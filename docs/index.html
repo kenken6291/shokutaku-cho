@@ -361,6 +361,18 @@
     background:none;border:1px solid var(--paper-line);color:var(--ink-soft);
     padding:9px 20px;border-radius:4px;font-size:13px;cursor:pointer;font-family:inherit;
   }
+
+  /* --- パスワード表示/非表示 --- */
+  .password-wrap{position:relative;margin-bottom:14px;}
+  .password-wrap input[type="password"], .password-wrap input[type="text"]{
+    margin-bottom:0;padding-right:58px;
+  }
+  .pw-toggle{
+    position:absolute;top:50%;right:4px;transform:translateY(-50%);
+    background:none;border:none;color:var(--ink-soft);font-size:11.5px;
+    cursor:pointer;font-family:inherit;padding:8px 8px;
+  }
+  .pw-toggle:hover{color:var(--stamp);}
 </style>
 </head>
 <body>
@@ -377,7 +389,10 @@
     <label for="loginEmail">メールアドレス</label>
     <input type="email" id="loginEmail" autocomplete="username">
     <label for="loginPassword">パスワード</label>
-    <input type="password" id="loginPassword" autocomplete="current-password">
+    <div class="password-wrap">
+      <input type="password" id="loginPassword" autocomplete="current-password">
+      <button type="button" class="pw-toggle" data-target="loginPassword">表示</button>
+    </div>
     <div class="forminline-error" id="loginError"></div>
     <button class="primary-btn" id="loginBtn">ログイン</button>
     <p class="switch-link">初めての方は <a id="goSignupLink">新規登録</a></p>
@@ -423,11 +438,20 @@
     <label>メールアドレス</label>
     <input type="text" id="pwChangeEmail" disabled>
     <label for="pwChangeCurrent">仮パスワード（メールに記載）</label>
-    <input type="password" id="pwChangeCurrent" autocomplete="current-password">
+    <div class="password-wrap">
+      <input type="password" id="pwChangeCurrent" autocomplete="current-password">
+      <button type="button" class="pw-toggle" data-target="pwChangeCurrent">表示</button>
+    </div>
     <label for="pwChangeNew">新しいパスワード（8文字以上）</label>
-    <input type="password" id="pwChangeNew" autocomplete="new-password">
+    <div class="password-wrap">
+      <input type="password" id="pwChangeNew" autocomplete="new-password">
+      <button type="button" class="pw-toggle" data-target="pwChangeNew">表示</button>
+    </div>
     <label for="pwChangeConfirm">新しいパスワード（確認）</label>
-    <input type="password" id="pwChangeConfirm" autocomplete="new-password">
+    <div class="password-wrap">
+      <input type="password" id="pwChangeConfirm" autocomplete="new-password">
+      <button type="button" class="pw-toggle" data-target="pwChangeConfirm">表示</button>
+    </div>
     <div class="forminline-error" id="pwChangeError"></div>
     <button class="primary-btn" id="pwChangeBtn">変更する</button>
   </div>
@@ -451,9 +475,18 @@
 
       <div class="settings-section">
         <h4>パスワード変更</h4>
-        <input type="password" id="accountCurrentPassword" placeholder="現在のパスワード" autocomplete="current-password">
-        <input type="password" id="accountNewPassword" placeholder="新しいパスワード（8文字以上）" autocomplete="new-password">
-        <input type="password" id="accountConfirmPassword" placeholder="新しいパスワード（確認）" autocomplete="new-password">
+        <div class="password-wrap">
+          <input type="password" id="accountCurrentPassword" placeholder="現在のパスワード" autocomplete="current-password">
+          <button type="button" class="pw-toggle" data-target="accountCurrentPassword">表示</button>
+        </div>
+        <div class="password-wrap">
+          <input type="password" id="accountNewPassword" placeholder="新しいパスワード（8文字以上）" autocomplete="new-password">
+          <button type="button" class="pw-toggle" data-target="accountNewPassword">表示</button>
+        </div>
+        <div class="password-wrap">
+          <input type="password" id="accountConfirmPassword" placeholder="新しいパスワード（確認）" autocomplete="new-password">
+          <button type="button" class="pw-toggle" data-target="accountConfirmPassword">表示</button>
+        </div>
         <div class="forminline-error" id="accountPasswordError"></div>
         <button class="danger-btn" style="border-color:var(--stamp);color:var(--stamp);" id="savePasswordBtn">変更する</button>
       </div>
@@ -731,6 +764,9 @@ async function init(){
   /* ---- 履歴 ---- */
   $('toggleFullHistoryBtn').addEventListener('click', onToggleFullHistory);
 
+  /* ---- パスワード表示/非表示 ---- */
+  initPasswordToggles();
+
   /* ---- セッション復元 ---- */
   const token = localStorage.getItem(TOKEN_KEY);
   if (token) {
@@ -745,6 +781,24 @@ async function init(){
   } else {
     showScreen('login');
   }
+}
+
+/* ================= パスワード表示/非表示 ================= */
+
+function initPasswordToggles(){
+  document.querySelectorAll('.pw-toggle').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const input = $(btn.getAttribute('data-target'));
+      if (!input) return;
+      if (input.type === 'password') {
+        input.type = 'text';
+        btn.textContent = '隠す';
+      } else {
+        input.type = 'password';
+        btn.textContent = '表示';
+      }
+    });
+  });
 }
 
 /* ================= 認証 ================= */
