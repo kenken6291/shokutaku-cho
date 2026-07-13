@@ -1,50 +1,79 @@
 /**
  * ==============================================================
- * 食卓帳 - GAS バックエンド（メール認証版）
+ * 食卓帳 - GAS バックエンド（メール認証・歩数記録版）
  * ==============================================================
  *
  * 【できること】
  *   1. メールアドレス登録 → 仮パスワードをメール送信 → 初回ログイン時にパスワード変更必須
- *   2. 表示用ニックネーム（登録後も変更可能）
- *   3. 利用規約・免責事項への同意をもって登録完了
- *   4. 食事写真からAIでカロリー・PFCを解析してスプレッドシートに記録
- *   5. 性別・年齢・身長・活動レベルからなる「からだプロフィール」、体重記録、基礎代謝(BMR)・
- *      消費エネルギー目安(TDEE)の算出（厚生労働省「日本人の食事摂取基準（2020年版）」準拠）
+ *   2. 表示用ニックネーム（登録後も変更可能）、利用規約・免責事項への同意
+ *   3. 食事写真からAIでカロリー・PFCを解析してスプレッドシートに記録
+ *   4. からだプロフィール（性別・年齢・身長・活動レベル）、体重記録、基礎代謝(BMR)算出
+ *   5. 歩数記録 → 歩数から消費カロリーを概算し、体重記録がある日はBMR+歩数消費、
+ *      無い日はBMR×活動レベル(PAL)で「本日の消費カロリー合計」を算出
  *   6. 「100日チャレンジ」：進捗・継続記録日数・連続記録日数を育つキャラクターと共に表示
- *   7. 食事・体重の履歴一覧表示、修正・削除
+ *   7. 食事・体重・歩数の履歴一覧表示、日付・時刻を含めて修正・削除
  *   8. アカウント設定（ニックネーム変更・パスワード変更・アカウント削除）
  *
  * 【事前設定】スクリプトプロパティ（プロジェクトの設定 > スクリプト プロパティ）
  *   GEMINI_API_KEY  : Google AI Studio で発行したGemini APIキー（必須）
  *   SHEET_ID        : 記録先スプレッドシートのID（未設定ならバインド先スプレッドシートを使用）
  *   DRIVE_FOLDER_ID : 食事写真を保存するGoogle DriveフォルダID（任意）
- *   PASSWORD_PEPPER : パスワードハッシュ化に使う秘密文字列（必須・自分で決めた適当な長い文字列でOK）
+ *   PASSWORD_PEPPER : パスワードハッシュ化に使う秘密文字列（必須）
  *
  * 【Webアプリのデプロイ設定】
  *   実行するユーザー: 自分（スクリプト所有者）
  *   アクセスできるユーザー: 全員（匿名ユーザーを含む）
  *
- * 【注意】この版から識別キーが「ニックネーム」から「メールアドレス」に変わりました。
- * 　　　　以前のバージョンでニックネームのみで記録したデータとは紐付きません。
+ * 【重要】日付・時刻列は必ずプレーンテキスト書式で保存する。
+ * Googleスプレッドシートは「2026-07-08」のような文字列を書き込むと自動的に日付型セルに
+ * 変換してしまい、後で読み取ると全く別のDateオブジェクト（UTC変換された値）になって返ってくる。
+ * この不具合を修正するため、日付・時刻列は sheet.setNumberFormat('@') でプレーンテキスト化した上で
+ * 文字列を書き込んでいる。既存データが既に壊れている場合は repairDateFormatting() を
+ * スクリプトエディタから一度手動実行することで修復できる。
  * ==============================================================
  */
 
 const MEAL_SHEET_NAME = '摂取カロリー記録';
 const PROFILE_SHEET_NAME = 'プロフィール';
 const WEIGHT_SHEET_NAME = '体重記録';
+const STEPS_SHEET_NAME = '歩数記録';
 const USER_SHEET_NAME = 'ユーザー';
 const CHALLENGE_SHEET_NAME = 'チャレンジ';
 const DIARY_SHEET_NAME = 'ひとこと日記';
 const GEMINI_MODEL = 'gemini-3.5-flash'; // 現行の安定版フラッグシップモデル（2026年7月時点）
 const CHALLENGE_TOTAL_DAYS = 100;
 const MIN_PASSWORD_LENGTH = 8;
+const STEPS_KCAL_PER_KG_PER_STEP = 0.0005; // 歩数消費カロリーの係数（下記 calcStepsCalories_ 参照）
 
 const MEAL_HEADER = ['ID', 'メールアドレス', '日付', '時刻', '料理名', 'カロリー(kcal)', 'たんぱく質(g)', '脂質(g)', '炭水化物(g)', '画像URL', '備考'];
 const PROFILE_HEADER = ['メールアドレス', '性別', '年齢', '身長(cm)', '活動レベル', '更新日時'];
 const WEIGHT_HEADER = ['ID', 'メールアドレス', '日付', '体重(kg)', '登録時刻'];
+const STEPS_HEADER = ['ID', 'メールアドレス', '日付', '歩数', '消費カロリー(kcal)', '登録時刻'];
 const USER_HEADER = ['メールアドレス', 'パスワードハッシュ', 'ソルト', 'ニックネーム', '仮パスワード', 'セッショントークン', '規約同意日時', '登録日時', '更新日時'];
 const CHALLENGE_HEADER = ['メールアドレス', '開始日', 'メッセージ25', 'メッセージ50', 'メッセージ75', 'メッセージ100', '更新日時'];
 const DIARY_HEADER = ['メールアドレス', '日付', 'ひとこと'];
+
+/**
+ * 日付・時刻・日時を含む列のプレーンテキスト化対象（1始まりの列番号）。
+ * getOrCreateSheet_ での新規作成時、および repairDateFormatting() での一括修復に使用する。
+ */
+const DATE_TIME_COLUMN_CONFIG = {};
+DATE_TIME_COLUMN_CONFIG[MEAL_SHEET_NAME] = { date: [3], time: [4], datetime: [] };
+DATE_TIME_COLUMN_CONFIG[WEIGHT_SHEET_NAME] = { date: [3], time: [5], datetime: [] };
+DATE_TIME_COLUMN_CONFIG[STEPS_SHEET_NAME] = { date: [3], time: [6], datetime: [] };
+DATE_TIME_COLUMN_CONFIG[CHALLENGE_SHEET_NAME] = { date: [2], time: [], datetime: [7] };
+DATE_TIME_COLUMN_CONFIG[DIARY_SHEET_NAME] = { date: [2], time: [], datetime: [] };
+DATE_TIME_COLUMN_CONFIG[USER_SHEET_NAME] = { date: [], time: [], datetime: [7, 8, 9] };
+DATE_TIME_COLUMN_CONFIG[PROFILE_SHEET_NAME] = { date: [], time: [], datetime: [6] };
+
+const HEADER_BY_SHEET_ = {};
+HEADER_BY_SHEET_[MEAL_SHEET_NAME] = MEAL_HEADER;
+HEADER_BY_SHEET_[WEIGHT_SHEET_NAME] = WEIGHT_HEADER;
+HEADER_BY_SHEET_[STEPS_SHEET_NAME] = STEPS_HEADER;
+HEADER_BY_SHEET_[CHALLENGE_SHEET_NAME] = CHALLENGE_HEADER;
+HEADER_BY_SHEET_[DIARY_SHEET_NAME] = DIARY_HEADER;
+HEADER_BY_SHEET_[USER_SHEET_NAME] = USER_HEADER;
+HEADER_BY_SHEET_[PROFILE_SHEET_NAME] = PROFILE_HEADER;
 
 /**
  * 基礎代謝基準値（kcal/kg体重/日） 出典: 厚生労働省「日本人の食事摂取基準（2020年版）」
@@ -88,11 +117,6 @@ const PAL_TABLE = [
  * ==============================================================
  */
 
-/**
- * POSTリクエストを種別ごとに振り分ける。
- * リクエストボディ(JSON): { "type": "...", ... }
- * ブラウザからのCORSプリフライトを避けるため、クライアント側は Content-Type: text/plain で送信すること。
- */
 function doPost(e) {
   const output = ContentService.createTextOutput().setMimeType(ContentService.MimeType.JSON);
 
@@ -113,12 +137,15 @@ function doPost(e) {
       case 'meal': result = handleMealPost_(payload); break;
       case 'profile': result = handleProfilePost_(payload); break;
       case 'weight': result = handleWeightPost_(payload); break;
+      case 'steps': result = handleStepsPost_(payload); break;
       case 'challenge': result = handleChallengePost_(payload); break;
       case 'diary': result = handleDiaryPost_(payload); break;
       case 'updateMeal': result = handleUpdateMealPost_(payload); break;
       case 'deleteMeal': result = handleDeleteMealPost_(payload); break;
       case 'updateWeight': result = handleUpdateWeightPost_(payload); break;
       case 'deleteWeight': result = handleDeleteWeightPost_(payload); break;
+      case 'updateSteps': result = handleUpdateStepsPost_(payload); break;
+      case 'deleteSteps': result = handleDeleteStepsPost_(payload); break;
       default: throw new Error('不明なリクエスト種別です: ' + payload.type);
     }
 
@@ -133,7 +160,7 @@ function doPost(e) {
 /**
  * データ取得。クエリパラメータ:
  *   ?token=セッショントークン&action=dashboard  … 本日のダッシュボード（既定）
- *   ?token=セッショントークン&action=history    … 食事・体重の全履歴
+ *   ?token=セッショントークン&action=history    … 食事・体重・歩数の全履歴
  */
 function doGet(e) {
   const output = ContentService.createTextOutput().setMimeType(ContentService.MimeType.JSON);
@@ -143,7 +170,7 @@ function doGet(e) {
     const action = (e && e.parameter && e.parameter.action) || 'dashboard';
 
     if (!token) {
-      const empty = action === 'history' ? { meals: [], weights: [] } : emptyDashboard_();
+      const empty = action === 'history' ? { meals: [], weights: [], steps: [] } : emptyDashboard_();
       output.setContent(JSON.stringify({ status: 'success', data: empty }));
       return output;
     }
@@ -198,7 +225,6 @@ function handleSignupPost_(payload) {
   try {
     sendTempPasswordEmail_(email, tempPassword);
   } catch (mailErr) {
-    // メール送信に失敗した場合は登録行を削除し、再登録できるようにする
     const rowIndex = findRowIndexByKey_(sheet, email);
     if (rowIndex) sheet.deleteRow(rowIndex);
     throw new Error('確認メールの送信に失敗しました。しばらくしてから再度お試しください。');
@@ -234,10 +260,6 @@ function handleLoginPost_(payload) {
   return { status: 'success', data: { token: token, nickname: nickname, email: email } };
 }
 
-/**
- * パスワード変更。初回ログイン時の強制変更（email指定）・アカウント設定からの任意変更（token指定）の両方に対応。
- * いずれの場合も現在のパスワード（初回は仮パスワード）の確認を必須とする。
- */
 function handleChangePasswordPost_(payload) {
   const newPassword = String(payload.newPassword || '');
   if (newPassword.length < MIN_PASSWORD_LENGTH) {
@@ -294,10 +316,6 @@ function handleUpdateNicknamePost_(payload) {
   return { status: 'success', data: { nickname: nickname } };
 }
 
-/**
- * アカウントを削除する。ユーザーの認証情報のみ削除し、過去の食事・体重等の記録データは残す
- * （同じメールアドレスで再登録した場合に履歴として復元されるようにするため）。
- */
 function handleDeleteAccountPost_(payload) {
   const session = resolveSession_(payload.token);
   const sheet = getOrCreateSheet_(USER_SHEET_NAME, USER_HEADER);
@@ -316,9 +334,6 @@ function handleLogoutPost_(payload) {
   return { status: 'success', data: {} };
 }
 
-/**
- * トークンからユーザー（メールアドレス・ニックネーム・行番号）を特定する。
- */
 function resolveSession_(token) {
   if (!token) throw new Error('ログインが必要です');
   const sheet = getOrCreateSheet_(USER_SHEET_NAME, USER_HEADER);
@@ -372,7 +387,7 @@ function generateToken_() {
 }
 
 function generateTempPassword_() {
-  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789'; // 紛らわしい0/O,1/l/I等は除外
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789';
   let pw = '';
   for (let i = 0; i < 10; i++) {
     pw += chars.charAt(Math.floor(Math.random() * chars.length));
@@ -407,7 +422,7 @@ function sanitizeNickname_(name) {
 
 /**
  * ==============================================================
- * POSTハンドラ（記録系：食事・からだ・体重・チャレンジ・ひとこと）
+ * POSTハンドラ（記録系：食事・からだ・体重・歩数・チャレンジ・ひとこと）
  * ==============================================================
  */
 
@@ -465,6 +480,17 @@ function handleWeightPost_(payload) {
   return { status: 'success', data: { weightKg: weightKg, id: id } };
 }
 
+function handleStepsPost_(payload) {
+  const session = resolveSession_(payload.token);
+
+  const steps = Math.round(Number(payload.steps));
+  if (!steps || steps < 0 || steps > 100000) throw new Error('歩数を正しく入力してください（0〜100,000歩）');
+
+  const result = upsertStepsToday_(session.email, steps);
+
+  return { status: 'success', data: { steps: steps, caloriesBurned: result.caloriesBurned, id: result.id } };
+}
+
 function handleChallengePost_(payload) {
   const session = resolveSession_(payload.token);
 
@@ -497,7 +523,7 @@ function sanitizeMessage_(text) {
 
 /**
  * ==============================================================
- * 履歴の修正・削除（食事・体重）
+ * 履歴の修正・削除（食事・体重・歩数）
  * ==============================================================
  */
 
@@ -512,7 +538,7 @@ function handleUpdateMealPost_(payload) {
 
   const date = String(payload.date || '').trim();
   if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) throw new Error('日付を正しく指定してください');
-  const time = normalizeTime_(payload.time);
+  const time = normalizeTimeInput_(payload.time);
 
   const foodName = String(payload.foodName || '').trim().substring(0, 40);
   const calories = Math.round(Number(payload.calories) || 0);
@@ -556,7 +582,7 @@ function handleUpdateWeightPost_(payload) {
   const weightKg = Math.round(Number(payload.weightKg) * 10) / 10;
   if (!weightKg || weightKg < 20 || weightKg > 300) throw new Error('体重を正しく入力してください（20〜300kg）');
 
-  if (isDateTakenByOtherRow_(sheet, session.email, date, rowIndex)) {
+  if (isDateTakenByOtherRow_(sheet, session.email, date, rowIndex, 2)) {
     throw new Error('その日付には既に別の体重記録があります。日付を変更する場合は、先にその日の記録を削除してください。');
   }
 
@@ -577,29 +603,61 @@ function handleDeleteWeightPost_(payload) {
   return { status: 'success', data: { id: id } };
 }
 
-/**
- * 同じユーザーの他の行に、指定した日付の体重記録が既に存在するかを調べる
- * （体重は1日1件のため、日付変更時の重複を防ぐ）
- */
-function isDateTakenByOtherRow_(sheet, email, dateStr, excludeRowIndex) {
-  if (sheet.getLastRow() < 2) return false;
-  const values = sheet.getRange(2, 1, sheet.getLastRow() - 1, 3).getValues();
-  for (let i = 0; i < values.length; i++) {
-    const rowIndex = i + 2;
-    if (rowIndex === excludeRowIndex) continue;
-    if (values[i][1] === email && values[i][2] === dateStr) return true;
+function handleUpdateStepsPost_(payload) {
+  const session = resolveSession_(payload.token);
+  const id = String(payload.id || '');
+  if (!id) throw new Error('対象のIDが指定されていません');
+
+  const sheet = getOrCreateSheet_(STEPS_SHEET_NAME, STEPS_HEADER);
+  const rowIndex = findRowIndexByIdAndEmail_(sheet, id, session.email, 0, 1);
+  if (!rowIndex) throw new Error('対象の記録が見つかりませんでした');
+
+  const date = String(payload.date || '').trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) throw new Error('日付を正しく指定してください');
+
+  const steps = Math.round(Number(payload.steps));
+  if (!steps || steps < 0 || steps > 100000) throw new Error('歩数を正しく入力してください（0〜100,000歩）');
+
+  if (isDateTakenByOtherRow_(sheet, session.email, date, rowIndex, 2)) {
+    throw new Error('その日付には既に別の歩数記録があります。日付を変更する場合は、先にその日の記録を削除してください。');
   }
-  return false;
+
+  const latestWeight = getLatestWeight_(session.email);
+  const caloriesBurned = latestWeight ? calcStepsCalories_(latestWeight.weightKg, steps) : 0;
+
+  sheet.getRange(rowIndex, 3, 1, 2).setValues([[date, steps]]);
+  sheet.getRange(rowIndex, 5, 1, 1).setValue(caloriesBurned);
+
+  return { status: 'success', data: { id: id, date: date, steps: steps, caloriesBurned: caloriesBurned } };
+}
+
+function handleDeleteStepsPost_(payload) {
+  const session = resolveSession_(payload.token);
+  const id = String(payload.id || '');
+  if (!id) throw new Error('対象のIDが指定されていません');
+
+  const sheet = getOrCreateSheet_(STEPS_SHEET_NAME, STEPS_HEADER);
+  const rowIndex = findRowIndexByIdAndEmail_(sheet, id, session.email, 0, 1);
+  if (!rowIndex) throw new Error('対象の記録が見つかりませんでした');
+
+  sheet.deleteRow(rowIndex);
+  return { status: 'success', data: { id: id } };
 }
 
 /**
- * "HH:mm" または "HH:mm:ss" を "HH:mm:ss" に正規化する。不正な値は現在時刻で代用する。
+ * 指定した日付が、同じユーザーの他の行に既に存在するかを調べる（体重・歩数は1日1件のため）。
+ * dateColIdx は0始まりの列インデックス。
  */
-function normalizeTime_(time) {
-  const t = String(time || '').trim();
-  if (/^\d{2}:\d{2}:\d{2}$/.test(t)) return t;
-  if (/^\d{2}:\d{2}$/.test(t)) return t + ':00';
-  return Utilities.formatDate(new Date(), 'Asia/Tokyo', 'HH:mm:ss');
+function isDateTakenByOtherRow_(sheet, email, dateStr, excludeRowIndex, dateColIdx) {
+  if (sheet.getLastRow() < 2) return false;
+  const numCols = Math.max(dateColIdx, 1) + 1;
+  const values = sheet.getRange(2, 1, sheet.getLastRow() - 1, numCols).getValues();
+  for (let i = 0; i < values.length; i++) {
+    const rowIndex = i + 2;
+    if (rowIndex === excludeRowIndex) continue;
+    if (values[i][1] === email && normalizeDateValue_(values[i][dateColIdx]) === dateStr) return true;
+  }
+  return false;
 }
 
 function findRowIndexByIdAndEmail_(sheet, id, email, idColIdx, emailColIdx) {
@@ -623,12 +681,22 @@ function buildDashboard_(email) {
   const latestWeight = getLatestWeight_(email);
   const todayMeals = getTodayMealRecords_(email);
   const todayCalories = todayMeals.reduce(function (sum, r) { return sum + (Number(r.calories) || 0); }, 0);
+  const todaySteps = getTodaySteps_(email);
 
-  let bmr = null, tdee = null, balance = null, weeklyDelta = null;
+  let bmr = null, tdee = null, tdeeSource = null, balance = null, weeklyDelta = null;
   if (profile && latestWeight) {
     bmr = calcBmr_(profile.sex, profile.age, latestWeight.weightKg);
-    const pal = palValue_(profile.age, profile.palLevel);
-    tdee = Math.round(bmr * pal);
+
+    if (todaySteps) {
+      // 歩数の実測値がある日はBMR＋歩数消費で算出（PALによる推定より精度が高い）
+      tdee = bmr + todaySteps.caloriesBurned;
+      tdeeSource = 'steps';
+    } else {
+      const pal = palValue_(profile.age, profile.palLevel);
+      tdee = Math.round(bmr * pal);
+      tdeeSource = 'pal';
+    }
+
     balance = todayCalories - tdee;
     weeklyDelta = Math.round((balance * 7 / 7200) * 100) / 100;
   }
@@ -640,15 +708,15 @@ function buildDashboard_(email) {
 
   return {
     profile: profile, latestWeight: latestWeight, todayMeals: todayMeals, todayCalories: todayCalories,
-    bmr: bmr, tdee: tdee, balance: balance, weeklyDelta: weeklyDelta,
+    todaySteps: todaySteps, bmr: bmr, tdee: tdee, tdeeSource: tdeeSource, balance: balance, weeklyDelta: weeklyDelta,
     streakDays: streakDays, todayDiary: todayDiary, challenge: challenge
   };
 }
 
 function emptyDashboard_() {
   return {
-    profile: null, latestWeight: null, todayMeals: [], todayCalories: 0,
-    bmr: null, tdee: null, balance: null, weeklyDelta: null,
+    profile: null, latestWeight: null, todayMeals: [], todayCalories: 0, todaySteps: null,
+    bmr: null, tdee: null, tdeeSource: null, balance: null, weeklyDelta: null,
     streakDays: 0, todayDiary: '', challenge: null
   };
 }
@@ -661,8 +729,9 @@ function buildHistory_(email) {
     meals = values
       .filter(function (row) { return row[1] === email; })
       .map(function (row) {
+        const date = normalizeDateValue_(row[2]), time = normalizeTimeValue_(row[3]);
         return {
-          id: row[0], date: row[2], time: row[3], foodName: row[4], calories: row[5],
+          id: row[0], date: date, time: time, foodName: row[4], calories: row[5],
           protein: row[6], fat: row[7], carbs: row[8], imageUrl: row[9], note: row[10]
         };
       })
@@ -677,18 +746,31 @@ function buildHistory_(email) {
     weights = values
       .filter(function (row) { return row[1] === email; })
       .map(function (row) {
-        return { id: row[0], date: row[2], weightKg: row[3], time: row[4] };
+        return { id: row[0], date: normalizeDateValue_(row[2]), weightKg: row[3] };
       })
       .sort(function (a, b) { return String(b.date).localeCompare(String(a.date)); })
       .slice(0, 200);
   }
 
-  return { meals: meals, weights: weights };
+  const stepsSheet = getOrCreateSheet_(STEPS_SHEET_NAME, STEPS_HEADER);
+  let steps = [];
+  if (stepsSheet.getLastRow() >= 2) {
+    const values = stepsSheet.getRange(2, 1, stepsSheet.getLastRow() - 1, STEPS_HEADER.length).getValues();
+    steps = values
+      .filter(function (row) { return row[1] === email; })
+      .map(function (row) {
+        return { id: row[0], date: normalizeDateValue_(row[2]), steps: row[3], caloriesBurned: row[4] };
+      })
+      .sort(function (a, b) { return String(b.date).localeCompare(String(a.date)); })
+      .slice(0, 200);
+  }
+
+  return { meals: meals, weights: weights, steps: steps };
 }
 
 /**
  * ==============================================================
- * 基礎代謝・活動レベル 計算
+ * 基礎代謝・活動レベル・歩数消費カロリー 計算
  * ==============================================================
  */
 
@@ -711,6 +793,20 @@ function findBand_(table, age) {
 
 function calcBmr_(sex, age, weightKg) {
   return Math.round(bmrPerKg_(age, sex) * weightKg);
+}
+
+/**
+ * 歩数から消費カロリーを概算する。
+ * 消費カロリー(kcal) ≈ 体重(kg) × 歩数 × 0.0005
+ *
+ * 根拠: 一般的な運動消費カロリーの計算式「METs×体重(kg)×時間(h)×1.05」に、
+ * 普通歩行(3.0METs)・歩行ケイデンス約100歩/分という仮定を当てはめると
+ * 時間(h)=歩数/100/60 となり、係数は 3.0×1.05/6000 ≈ 0.000525。
+ * 体重60kg・1万歩で約300〜315kcalとなり、厚生労働省のメッツ表に基づく
+ * 一般的な目安（体重60kgで1万歩=約300〜350kcal）とおおむね一致する。
+ */
+function calcStepsCalories_(weightKg, steps) {
+  return Math.round(weightKg * steps * STEPS_KCAL_PER_KG_PER_STEP);
 }
 
 /**
@@ -775,8 +871,9 @@ function getLatestWeight_(email) {
   let latest = null;
   values.forEach(function (row) {
     if (row[1] === email) {
-      if (!latest || String(row[2]) > latest.date) {
-        latest = { id: row[0], date: row[2], weightKg: Number(row[3]) };
+      const d = normalizeDateValue_(row[2]);
+      if (!latest || d > latest.date) {
+        latest = { id: row[0], date: d, weightKg: Number(row[3]) };
       }
     }
   });
@@ -791,7 +888,7 @@ function upsertWeightToday_(email, weightKg) {
   if (sheet.getLastRow() >= 2) {
     const values = sheet.getRange(2, 1, sheet.getLastRow() - 1, 3).getValues();
     for (let i = 0; i < values.length; i++) {
-      if (values[i][1] === email && values[i][2] === today) {
+      if (values[i][1] === email && normalizeDateValue_(values[i][2]) === today) {
         sheet.getRange(i + 2, 4, 1, 2).setValues([[weightKg, nowTime]]);
         return values[i][0];
       }
@@ -809,13 +906,56 @@ function getWeightOnOrAfter_(email, dateStr) {
   const values = sheet.getRange(2, 1, sheet.getLastRow() - 1, WEIGHT_HEADER.length).getValues();
   let earliest = null;
   values.forEach(function (row) {
-    if (row[1] === email && String(row[2]) >= dateStr) {
-      if (!earliest || String(row[2]) < earliest.date) {
-        earliest = { id: row[0], date: row[2], weightKg: Number(row[3]) };
+    const d = normalizeDateValue_(row[2]);
+    if (row[1] === email && d >= dateStr) {
+      if (!earliest || d < earliest.date) {
+        earliest = { id: row[0], date: d, weightKg: Number(row[3]) };
       }
     }
   });
   return earliest;
+}
+
+/**
+ * ==============================================================
+ * 歩数記録（1日1件、当日分は上書き）
+ * ==============================================================
+ */
+
+function getTodaySteps_(email) {
+  const sheet = getOrCreateSheet_(STEPS_SHEET_NAME, STEPS_HEADER);
+  if (sheet.getLastRow() < 2) return null;
+
+  const today = todayStr_();
+  const values = sheet.getRange(2, 1, sheet.getLastRow() - 1, STEPS_HEADER.length).getValues();
+  for (let i = 0; i < values.length; i++) {
+    if (values[i][1] === email && normalizeDateValue_(values[i][2]) === today) {
+      return { id: values[i][0], date: today, steps: Number(values[i][3]), caloriesBurned: Number(values[i][4]) };
+    }
+  }
+  return null;
+}
+
+function upsertStepsToday_(email, steps) {
+  const sheet = getOrCreateSheet_(STEPS_SHEET_NAME, STEPS_HEADER);
+  const today = todayStr_();
+  const nowTime = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'HH:mm:ss');
+
+  const latestWeight = getLatestWeight_(email);
+  const caloriesBurned = latestWeight ? calcStepsCalories_(latestWeight.weightKg, steps) : 0;
+
+  if (sheet.getLastRow() >= 2) {
+    const values = sheet.getRange(2, 1, sheet.getLastRow() - 1, 3).getValues();
+    for (let i = 0; i < values.length; i++) {
+      if (values[i][1] === email && normalizeDateValue_(values[i][2]) === today) {
+        sheet.getRange(i + 2, 4, 1, 3).setValues([[steps, caloriesBurned, nowTime]]);
+        return { id: values[i][0], caloriesBurned: caloriesBurned };
+      }
+    }
+  }
+  const id = Utilities.getUuid();
+  sheet.appendRow([id, email, today, steps, caloriesBurned, nowTime]);
+  return { id: id, caloriesBurned: caloriesBurned };
 }
 
 /**
@@ -832,7 +972,7 @@ function getChallenge_(email) {
   for (let i = 0; i < values.length; i++) {
     if (values[i][0] === email) {
       return {
-        startDate: values[i][1],
+        startDate: normalizeDateValue_(values[i][1]),
         messages: { 25: values[i][2] || '', 50: values[i][3] || '', 75: values[i][4] || '', 100: values[i][5] || '' }
       };
     }
@@ -886,7 +1026,7 @@ function getTodayDiary_(email) {
   const today = todayStr_();
   const values = sheet.getRange(2, 1, sheet.getLastRow() - 1, DIARY_HEADER.length).getValues();
   for (let i = 0; i < values.length; i++) {
-    if (values[i][0] === email && values[i][1] === today) return values[i][2] || '';
+    if (values[i][0] === email && normalizeDateValue_(values[i][1]) === today) return values[i][2] || '';
   }
   return '';
 }
@@ -898,7 +1038,7 @@ function upsertDiaryToday_(email, text) {
   if (sheet.getLastRow() >= 2) {
     const values = sheet.getRange(2, 1, sheet.getLastRow() - 1, 2).getValues();
     for (let i = 0; i < values.length; i++) {
-      if (values[i][0] === email && values[i][1] === today) {
+      if (values[i][0] === email && normalizeDateValue_(values[i][1]) === today) {
         sheet.getRange(i + 2, 3, 1, 1).setValues([[text]]);
         return;
       }
@@ -913,21 +1053,28 @@ function getActiveDaysSet_(email) {
   const mealSheet = getOrCreateSheet_(MEAL_SHEET_NAME, MEAL_HEADER);
   if (mealSheet.getLastRow() >= 2) {
     mealSheet.getRange(2, 1, mealSheet.getLastRow() - 1, 3).getValues().forEach(function (row) {
-      if (row[1] === email) days[row[2]] = true;
+      if (row[1] === email) days[normalizeDateValue_(row[2])] = true;
     });
   }
 
   const weightSheet = getOrCreateSheet_(WEIGHT_SHEET_NAME, WEIGHT_HEADER);
   if (weightSheet.getLastRow() >= 2) {
     weightSheet.getRange(2, 1, weightSheet.getLastRow() - 1, 3).getValues().forEach(function (row) {
-      if (row[1] === email) days[row[2]] = true;
+      if (row[1] === email) days[normalizeDateValue_(row[2])] = true;
+    });
+  }
+
+  const stepsSheet = getOrCreateSheet_(STEPS_SHEET_NAME, STEPS_HEADER);
+  if (stepsSheet.getLastRow() >= 2) {
+    stepsSheet.getRange(2, 1, stepsSheet.getLastRow() - 1, 3).getValues().forEach(function (row) {
+      if (row[1] === email) days[normalizeDateValue_(row[2])] = true;
     });
   }
 
   const diarySheet = getOrCreateSheet_(DIARY_SHEET_NAME, DIARY_HEADER);
   if (diarySheet.getLastRow() >= 2) {
     diarySheet.getRange(2, 1, diarySheet.getLastRow() - 1, 2).getValues().forEach(function (row) {
-      if (row[0] === email) days[row[1]] = true;
+      if (row[0] === email) days[normalizeDateValue_(row[1])] = true;
     });
   }
 
@@ -979,6 +1126,44 @@ function todayStr_() {
 
 function nowStr_() {
   return Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd HH:mm:ss');
+}
+
+/**
+ * ==============================================================
+ * 日付・時刻セルの正規化
+ * （スプレッドシートが文字列を自動的に日付型に変換してしまった場合の救済）
+ * ==============================================================
+ */
+
+function normalizeDateValue_(value) {
+  if (value instanceof Date) {
+    return Utilities.formatDate(value, 'Asia/Tokyo', 'yyyy-MM-dd');
+  }
+  return String(value);
+}
+
+function normalizeTimeValue_(value) {
+  if (value instanceof Date) {
+    return Utilities.formatDate(value, 'Asia/Tokyo', 'HH:mm:ss');
+  }
+  return String(value);
+}
+
+function normalizeDateTimeValue_(value) {
+  if (value instanceof Date) {
+    return Utilities.formatDate(value, 'Asia/Tokyo', 'yyyy-MM-dd HH:mm:ss');
+  }
+  return String(value);
+}
+
+/**
+ * クライアントから送られてきた時刻入力（"HH:mm" または "HH:mm:ss"）を "HH:mm:ss" に正規化する。
+ */
+function normalizeTimeInput_(time) {
+  const t = String(time || '').trim();
+  if (/^\d{2}:\d{2}:\d{2}$/.test(t)) return t;
+  if (/^\d{2}:\d{2}$/.test(t)) return t + ':00';
+  return Utilities.formatDate(new Date(), 'Asia/Tokyo', 'HH:mm:ss');
 }
 
 /**
@@ -1105,10 +1290,10 @@ function getTodayMealRecords_(email) {
   const values = sheet.getRange(2, 1, sheet.getLastRow() - 1, MEAL_HEADER.length).getValues();
 
   return values
-    .filter(function (row) { return row[1] === email && row[2] === today; })
+    .filter(function (row) { return row[1] === email && normalizeDateValue_(row[2]) === today; })
     .map(function (row) {
       return {
-        id: row[0], date: row[2], time: row[3], foodName: row[4],
+        id: row[0], date: normalizeDateValue_(row[2]), time: normalizeTimeValue_(row[3]), foodName: row[4],
         calories: row[5], protein: row[6], fat: row[7], carbs: row[8],
         imageUrl: row[9], note: row[10]
       };
@@ -1141,8 +1326,66 @@ function getOrCreateSheet_(name, header) {
     sheet.appendRow(header);
     sheet.getRange(1, 1, 1, header.length).setFontWeight('bold');
     sheet.setFrozenRows(1);
+    applyPlainTextFormat_(sheet, name);
   }
   return sheet;
+}
+
+/**
+ * 日付・時刻列をプレーンテキスト書式にする（スプレッドシートによる自動的な日付型変換を防ぐ）。
+ * シート全体（最大行）に対して適用し、将来追加される行にも書式が引き継がれるようにする。
+ */
+function applyPlainTextFormat_(sheet, sheetName) {
+  const config = DATE_TIME_COLUMN_CONFIG[sheetName];
+  if (!config) return;
+
+  const maxRows = sheet.getMaxRows();
+  const cols = config.date.concat(config.time).concat(config.datetime);
+  cols.forEach(function (col) {
+    sheet.getRange(1, col, maxRows, 1).setNumberFormat('@');
+  });
+}
+
+/**
+ * 【修復用・手動実行】既存シートの日付・時刻列がスプレッドシートによって
+ * 日付型セルに自動変換されてしまっている場合に、プレーンテキスト書式へ戻し、
+ * 既に壊れてしまった値（Dateオブジェクト）を正しい文字列に書き戻す。
+ * スクリプトエディタから一度だけ手動実行してください（実行 > repairDateFormatting）。
+ */
+function repairDateFormatting() {
+  Object.keys(DATE_TIME_COLUMN_CONFIG).forEach(function (sheetName) {
+    repairSheetDates_(sheetName, HEADER_BY_SHEET_[sheetName]);
+  });
+  Logger.log('日付・時刻列の修復が完了しました');
+}
+
+function repairSheetDates_(sheetName, header) {
+  const config = DATE_TIME_COLUMN_CONFIG[sheetName];
+  const sheet = getOrCreateSheet_(sheetName, header);
+
+  applyPlainTextFormat_(sheet, sheetName);
+
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 2) return;
+
+  const values = sheet.getRange(2, 1, lastRow - 1, header.length).getValues();
+  let changed = false;
+
+  values.forEach(function (row) {
+    config.date.forEach(function (col) {
+      if (row[col - 1] instanceof Date) { row[col - 1] = normalizeDateValue_(row[col - 1]); changed = true; }
+    });
+    config.time.forEach(function (col) {
+      if (row[col - 1] instanceof Date) { row[col - 1] = normalizeTimeValue_(row[col - 1]); changed = true; }
+    });
+    config.datetime.forEach(function (col) {
+      if (row[col - 1] instanceof Date) { row[col - 1] = normalizeDateTimeValue_(row[col - 1]); changed = true; }
+    });
+  });
+
+  if (changed) {
+    sheet.getRange(2, 1, lastRow - 1, header.length).setValues(values);
+  }
 }
 
 /**

@@ -575,13 +575,23 @@
       <div class="weight-meta" id="weightMeta"></div>
       <div class="forminline-error" id="weightError"></div>
 
+      <div class="weight-row">
+        <label for="stepsInput">歩数</label>
+        <input type="number" id="stepsInput" step="1" inputmode="numeric" placeholder="例: 6500">
+        <span class="unit">歩</span>
+        <button id="saveStepsBtn">記録</button>
+      </div>
+      <div class="weight-meta" id="stepsMeta"></div>
+      <div class="forminline-error" id="stepsError"></div>
+
       <div class="balance-block" id="balanceBlock">
         <div class="balance-row"><span class="k">基礎代謝（BMR）</span><span class="v" id="bmrValue">-</span></div>
-        <div class="balance-row"><span class="k">消費エネルギー目安</span><span class="v" id="tdeeValue">-</span></div>
+        <div class="balance-row" id="stepsCalorieRow" style="display:none;"><span class="k">歩数による消費</span><span class="v" id="stepsCalorieValue">-</span></div>
+        <div class="balance-row"><span class="k" id="tdeeLabel">本日の消費カロリー合計</span><span class="v" id="tdeeValue">-</span></div>
         <div class="balance-row main"><span class="k">本日の収支</span><span class="v" id="balanceValue">-</span></div>
         <div class="balance-note" id="balanceProjection"></div>
       </div>
-      <div class="balance-empty" id="balanceEmpty">からだの設定と体重の記録がそろうと、消費エネルギー目安と収支が表示されます</div>
+      <div class="balance-empty" id="balanceEmpty">からだの設定と体重の記録がそろうと、消費カロリーと収支が表示されます</div>
     </div>
 
     <!-- プロフィール編集フォーム（トグル表示） -->
@@ -652,7 +662,7 @@
       <button class="linklike toggle-full" id="toggleFullHistoryBtn">過去の記録をすべて見る ▾</button>
     </div>
 
-    <!-- 全履歴（食事・体重）：修正・削除ができる -->
+    <!-- 全履歴（食事・体重・歩数）：修正・削除ができる -->
     <div class="card" id="fullHistoryCard" style="display:none;">
       <div class="card-head"><h3>食事の履歴</h3></div>
       <ul class="edit-list" id="mealHistoryList"></ul>
@@ -661,6 +671,10 @@
       <div class="card-head" style="margin-top:22px;"><h3>体重の履歴</h3></div>
       <ul class="edit-list" id="weightHistoryList"></ul>
       <div class="empty" id="weightHistoryEmpty">記録がありません</div>
+
+      <div class="card-head" style="margin-top:22px;"><h3>歩数の履歴</h3></div>
+      <ul class="edit-list" id="stepsHistoryList"></ul>
+      <div class="empty" id="stepsHistoryEmpty">記録がありません</div>
     </div>
   </div>
 </div>
@@ -753,6 +767,7 @@ async function init(){
   $('cancelProfileBtn').addEventListener('click', closeProfileForm);
   $('saveProfileBtn').addEventListener('click', onSaveProfile);
   $('saveWeightBtn').addEventListener('click', onSaveWeight);
+  $('saveStepsBtn').addEventListener('click', onSaveSteps);
 
   /* ---- 100日チャレンジ ---- */
   $('startChallengeBtn').addEventListener('click', openChallengeForm);
@@ -1071,6 +1086,22 @@ async function onSaveWeight(){
   }
 }
 
+async function onSaveSteps(){
+  const steps = Number($('stepsInput').value);
+  if (!steps || steps < 0 || steps > 100000) {
+    $('stepsError').textContent = '歩数を正しく入力してください（0〜100,000歩）';
+    return;
+  }
+  $('stepsError').textContent = '';
+  try {
+    await postToGas({ type: 'steps', token: currentToken, steps: steps });
+    await loadDashboard();
+    fullHistoryLoaded = false;
+  } catch (err) {
+    $('stepsError').textContent = err.message || '記録に失敗しました';
+  }
+}
+
 /* ================= 100日チャレンジ ================= */
 
 function todayDateInputValue(){
@@ -1276,8 +1307,26 @@ function renderDashboard(data){
     $('weightMeta').textContent = '';
   }
 
+  if (data.todaySteps) {
+    $('stepsInput').value = data.todaySteps.steps;
+    $('stepsMeta').textContent = '本日の消費カロリー: ' + data.todaySteps.caloriesBurned + ' kcal';
+  } else {
+    $('stepsInput').value = '';
+    $('stepsMeta').textContent = '';
+  }
+
   if (data.bmr !== null && data.tdee !== null) {
     $('bmrValue').textContent = data.bmr + ' kcal';
+
+    if (data.tdeeSource === 'steps' && data.todaySteps) {
+      $('stepsCalorieRow').style.display = 'flex';
+      $('stepsCalorieValue').textContent = data.todaySteps.caloriesBurned + ' kcal（' + data.todaySteps.steps + '歩）';
+      $('tdeeLabel').textContent = '本日の消費カロリー合計（基礎代謝＋歩数）';
+    } else {
+      $('stepsCalorieRow').style.display = 'none';
+      $('tdeeLabel').textContent = '本日の消費カロリー合計（活動レベルからの推定）';
+    }
+
     $('tdeeValue').textContent = data.tdee + ' kcal';
     const sign = data.balance > 0 ? '+' : '';
     $('balanceValue').textContent = sign + data.balance + ' kcal';
@@ -1346,6 +1395,7 @@ async function loadFullHistory(){
     if (!json || json.status !== 'success') return;
     renderMealHistory(json.data.meals);
     renderWeightHistory(json.data.weights);
+    renderStepsHistory(json.data.steps);
   } catch (err) {
     console.warn('履歴の取得に失敗しました', err);
   }
@@ -1520,6 +1570,84 @@ async function onDeleteWeight(id, li){
     li.remove();
     await loadDashboard();
     if ($('weightHistoryList').children.length === 0) $('weightHistoryEmpty').style.display = 'block';
+  } catch (err) {
+    alert(err.message || '削除に失敗しました');
+  }
+}
+
+function renderStepsHistory(steps){
+  const list = $('stepsHistoryList');
+  list.innerHTML = '';
+
+  if (!steps || !steps.length) { $('stepsHistoryEmpty').style.display = 'block'; return; }
+  $('stepsHistoryEmpty').style.display = 'none';
+
+  steps.forEach((s) => {
+    const li = document.createElement('li');
+    li.className = 'edit-item';
+    li.innerHTML =
+      '<div class="edit-item-view">' +
+        '<div class="edit-item-main">' +
+          '<span class="edit-item-date">' + s.date + '</span>' +
+          '<span class="edit-item-name">' + s.steps + ' 歩</span>' +
+          '<span class="edit-item-value">' + s.caloriesBurned + ' kcal</span>' +
+        '</div>' +
+        '<div class="edit-item-actions">' +
+          '<button class="linklike ef-edit-btn">編集</button>' +
+          '<button class="linklike ef-delete-btn">削除</button>' +
+        '</div>' +
+      '</div>';
+    list.appendChild(li);
+
+    li.querySelector('.ef-edit-btn').addEventListener('click', () => showStepsEditForm(li, s));
+    li.querySelector('.ef-delete-btn').addEventListener('click', () => onDeleteSteps(s.id, li));
+  });
+}
+
+function showStepsEditForm(li, s){
+  if (li.querySelector('.edit-item-form')) return;
+  const view = li.querySelector('.edit-item-view');
+  view.style.display = 'none';
+
+  const form = document.createElement('div');
+  form.className = 'edit-item-form';
+  form.innerHTML =
+    '<div class="ef-row"><input type="date" class="ef-date"><input type="number" class="ef-steps" step="1" placeholder="歩数"></div>' +
+    '<div class="forminline-error ef-error"></div>' +
+    '<div class="ef-actions">' +
+      '<button class="ef-cancel">キャンセル</button>' +
+      '<button class="ef-save">保存</button>' +
+    '</div>';
+  li.appendChild(form);
+  form.querySelector('.ef-date').value = s.date;
+  form.querySelector('.ef-steps').value = s.steps;
+
+  form.querySelector('.ef-cancel').addEventListener('click', () => { form.remove(); view.style.display = ''; });
+  form.querySelector('.ef-save').addEventListener('click', async () => {
+    const date = form.querySelector('.ef-date').value;
+    const steps = Number(form.querySelector('.ef-steps').value);
+    if (!date) { form.querySelector('.ef-error').textContent = '日付を入力してください'; return; }
+    if (!steps || steps < 0 || steps > 100000) {
+      form.querySelector('.ef-error').textContent = '歩数を正しく入力してください';
+      return;
+    }
+    try {
+      await postToGas({ type: 'updateSteps', token: currentToken, id: s.id, date: date, steps: steps });
+      await loadFullHistory();
+      await loadDashboard();
+    } catch (err) {
+      form.querySelector('.ef-error').textContent = err.message || '保存に失敗しました';
+    }
+  });
+}
+
+async function onDeleteSteps(id, li){
+  if (!confirm('この記録を削除しますか？')) return;
+  try {
+    await postToGas({ type: 'deleteSteps', token: currentToken, id: id });
+    li.remove();
+    await loadDashboard();
+    if ($('stepsHistoryList').children.length === 0) $('stepsHistoryEmpty').style.display = 'block';
   } catch (err) {
     alert(err.message || '削除に失敗しました');
   }
