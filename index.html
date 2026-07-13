@@ -899,8 +899,9 @@ async function loadDashboard(){
   if (!currentUser || !isConfigured()) return;
   try {
     const res = await fetch(GAS_EXEC_URL + '?userName=' + encodeURIComponent(currentUser), { method: 'GET' });
-    const json = await res.json();
-    if (json.status !== 'success') return;
+    const rawText = await res.text();
+    const json = parseJsonSafe_(rawText);
+    if (!json || json.status !== 'success') return;
     renderDashboard(json.data);
   } catch (err) {
     console.warn('ダッシュボードの取得に失敗しました', err);
@@ -965,9 +966,30 @@ async function postToGas(body){
     body: JSON.stringify(body)
   });
   if (!res.ok) throw new Error('サーバーへの接続に失敗しました (HTTP ' + res.status + ')');
-  const json = await res.json();
+
+  const rawText = await res.text();
+  const json = parseJsonSafe_(rawText);
+  if (!json) throw new Error('サーバーからの応答を正しく読み取れませんでした。時間をおいて再度お試しください。');
   if (json.status !== 'success') throw new Error(json.message || '処理に失敗しました');
   return json;
+}
+
+/**
+ * ブラウザ拡張機能などの影響で応答に余分な文字が混ざっていても、
+ * 先頭のJSONオブジェクト部分だけを取り出して解析を試みる。
+ * 解析に失敗した場合は生の応答をコンソールに出力する（調査用）。
+ */
+function parseJsonSafe_(rawText){
+  try {
+    return JSON.parse(rawText);
+  } catch (e) {
+    const match = rawText.match(/\{[\s\S]*\}/);
+    if (match) {
+      try { return JSON.parse(match[0]); } catch (e2) { /* fall through */ }
+    }
+    console.warn('JSON解析に失敗しました。サーバーからの生の応答:', rawText);
+    return null;
+  }
 }
 
 function renderHistory(records, totalCalories){
