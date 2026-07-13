@@ -1,0 +1,397 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+<title>食卓帳 - 写真で記録する摂取カロリー</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Shippori+Mincho:wght@500;700&family=Zen+Kaku+Gothic+New:wght@400;500;700;900&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --paper:#F5EFE3;
+    --paper-line:#E1D6BE;
+    --card:#FBF8F2;
+    --ink:#2B3A55;
+    --ink-soft:#5B6B85;
+    --stamp:#B23A2E;
+    --stamp-dark:#8E2C22;
+    --kraft:#C98A2C;
+    --moss:#6B8F71;
+    --error:#9C4A3C;
+  }
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent;}
+  html,body{margin:0;padding:0;}
+  body{
+    background:
+      repeating-linear-gradient(0deg, transparent, transparent 27px, var(--paper-line) 28px),
+      var(--paper);
+    color:var(--ink);
+    font-family:'Zen Kaku Gothic New', sans-serif;
+    min-height:100vh;
+    display:flex;
+    justify-content:center;
+    padding:0 0 60px;
+  }
+  .app{width:100%;max-width:480px;padding:28px 20px 0;}
+
+  header{text-align:center;margin-bottom:22px;}
+  header .eyebrow{
+    font-size:12px;letter-spacing:.24em;color:var(--ink-soft);margin-bottom:6px;
+  }
+  header h1{
+    font-family:'Shippori Mincho', serif;
+    font-weight:700;
+    font-size:30px;
+    margin:0 0 6px;
+    letter-spacing:.06em;
+  }
+  header p{font-size:13px;color:var(--ink-soft);margin:0;line-height:1.6;}
+
+  /* --- 合計カロリーバー --- */
+  .summary{
+    display:flex;align-items:baseline;justify-content:center;gap:8px;
+    background:var(--card);
+    border:1px solid var(--paper-line);
+    border-radius:4px;
+    padding:14px 18px;
+    margin-bottom:26px;
+  }
+  .summary .label{font-size:13px;color:var(--ink-soft);}
+  .summary .value{font-family:'Shippori Mincho',serif;font-weight:700;font-size:28px;color:var(--stamp);}
+  .summary .unit{font-size:13px;color:var(--ink-soft);}
+
+  /* --- 撮影ボタン（判子風） --- */
+  .capture-wrap{display:flex;flex-direction:column;align-items:center;margin-bottom:30px;}
+  .stamp-btn{
+    width:132px;height:132px;border-radius:50%;
+    border:none;cursor:pointer;position:relative;
+    background:
+      radial-gradient(circle at 32% 28%, rgba(255,255,255,.16), transparent 55%),
+      radial-gradient(circle at 68% 74%, rgba(0,0,0,.10), transparent 60%),
+      var(--stamp);
+    box-shadow:0 6px 0 var(--stamp-dark), 0 10px 18px rgba(43,58,85,.25);
+    transform:rotate(-4deg);
+    transition:transform .12s ease, box-shadow .12s ease;
+    display:flex;align-items:center;justify-content:center;
+  }
+  .stamp-btn:active{
+    transform:rotate(-4deg) translateY(4px);
+    box-shadow:0 2px 0 var(--stamp-dark), 0 4px 10px rgba(43,58,85,.2);
+  }
+  .stamp-btn .kanji{
+    font-family:'Shippori Mincho',serif;
+    color:#fff;font-size:44px;font-weight:700;
+    filter:drop-shadow(0 1px 1px rgba(0,0,0,.15));
+  }
+  .capture-wrap .hint{margin-top:14px;font-size:12px;color:var(--ink-soft);}
+  #fileInput{display:none;}
+
+  /* --- 解析中 --- */
+  .analyzing{
+    display:none;
+    flex-direction:column;align-items:center;gap:10px;
+    margin-bottom:26px;
+  }
+  .analyzing.show{display:flex;}
+  .analyzing .thumb{
+    width:96px;height:96px;object-fit:cover;border-radius:4px;
+    border:1px solid var(--paper-line);
+    opacity:.6;
+  }
+  .analyzing .stamp-pulse{
+    width:20px;height:20px;border-radius:50%;background:var(--stamp);
+    animation:pulse 1.1s ease-in-out infinite;
+  }
+  .analyzing .msg{font-size:13px;color:var(--ink-soft);letter-spacing:.05em;}
+  @keyframes pulse{
+    0%,100%{transform:scale(1);opacity:.9;}
+    50%{transform:scale(1.5);opacity:.35;}
+  }
+
+  /* --- 結果レシートカード --- */
+  .receipt{
+    display:none;
+    position:relative;
+    background:var(--card);
+    border:1px solid var(--paper-line);
+    padding:22px 20px 18px;
+    margin-bottom:26px;
+    clip-path:polygon(
+      0% 6px, 3% 0%, 6% 6px, 9% 0%, 12% 6px, 15% 0%, 18% 6px, 21% 0%, 24% 6px, 27% 0%,
+      30% 6px, 33% 0%, 36% 6px, 39% 0%, 42% 6px, 45% 0%, 48% 6px, 51% 0%, 54% 6px, 57% 0%,
+      60% 6px, 63% 0%, 66% 6px, 69% 0%, 72% 6px, 75% 0%, 78% 6px, 81% 0%, 84% 6px, 87% 0%,
+      90% 6px, 93% 0%, 96% 6px, 100% 0%,
+      100% 100%, 0% 100%
+    );
+    animation:none;
+  }
+  .receipt.show{display:block;animation:rise .35s ease;}
+  @keyframes rise{from{opacity:0;transform:translateY(8px);}to{opacity:1;transform:translateY(0);}}
+  .receipt .stampmark{
+    position:absolute;top:14px;right:16px;
+    border:2px solid var(--stamp);color:var(--stamp);
+    font-size:11px;font-weight:700;letter-spacing:.1em;
+    padding:3px 8px;border-radius:3px;transform:rotate(-8deg);
+    opacity:.85;
+  }
+  .receipt h2{
+    font-family:'Shippori Mincho',serif;
+    font-size:20px;margin:4px 30px 14px 0;
+  }
+  .receipt .row{
+    display:flex;align-items:baseline;justify-content:space-between;
+    font-size:14px;padding:5px 0;
+    border-bottom:1px dotted var(--paper-line);
+  }
+  .receipt .row:last-of-type{border-bottom:none;}
+  .receipt .row .k{color:var(--ink-soft);}
+  .receipt .row .v{font-weight:700;}
+  .receipt .row.main .v{color:var(--kraft);font-size:17px;}
+  .receipt .note{margin-top:12px;font-size:11.5px;color:var(--ink-soft);line-height:1.6;}
+
+  /* --- エラー --- */
+  .errorbox{
+    display:none;
+    background:#F7EDE9;border:1px solid #E3C6BC;color:var(--error);
+    padding:16px 18px;border-radius:4px;margin-bottom:26px;font-size:13px;line-height:1.7;
+  }
+  .errorbox.show{display:block;}
+  .errorbox strong{display:block;margin-bottom:4px;font-size:14px;}
+  .errorbox button{
+    margin-top:10px;background:none;border:1px solid var(--error);color:var(--error);
+    padding:7px 14px;font-size:12px;border-radius:3px;cursor:pointer;
+  }
+
+  /* --- 設定未完了バナー --- */
+  .configwarn{
+    display:none;background:#FDF3D8;border:1px solid #E4C978;color:#7A5A12;
+    font-size:12px;padding:10px 14px;border-radius:4px;margin-bottom:20px;line-height:1.6;
+  }
+  .configwarn.show{display:block;}
+
+  /* --- 履歴 --- */
+  .history h3{
+    font-size:12px;letter-spacing:.14em;color:var(--ink-soft);
+    margin:0 0 10px;font-weight:500;
+  }
+  .history ul{list-style:none;margin:0;padding:0;}
+  .history li{
+    display:flex;align-items:center;gap:10px;
+    padding:10px 2px;border-bottom:1px solid var(--paper-line);
+    font-size:13px;
+  }
+  .history li .time{color:var(--ink-soft);font-variant-numeric:tabular-nums;width:48px;flex-shrink:0;}
+  .history li .name{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+  .history li .kcal{color:var(--kraft);font-weight:700;flex-shrink:0;}
+  .history .empty{font-size:13px;color:var(--ink-soft);padding:14px 2px;}
+</style>
+</head>
+<body>
+<div class="app">
+  <header>
+    <div class="eyebrow">MEAL LEDGER</div>
+    <h1>食卓帳</h1>
+    <p>写真を1枚撮るだけで、料理名・カロリー・PFCを自動で記帳します</p>
+  </header>
+
+  <div class="configwarn" id="configwarn">
+    ⚠ GAS_EXEC_URL が未設定です。index.html 内の <code>GAS_EXEC_URL</code> をデプロイ後の /exec URL に書き換えてください。
+  </div>
+
+  <div class="summary">
+    <span class="label">本日の合計</span>
+    <span class="value" id="totalKcal">0</span>
+    <span class="unit">kcal</span>
+  </div>
+
+  <div class="capture-wrap">
+    <button class="stamp-btn" id="captureBtn" aria-label="食事の写真を撮る">
+      <span class="kanji">撮</span>
+    </button>
+    <div class="hint">タップして食事の写真を撮影・選択</div>
+    <input type="file" id="fileInput" accept="image/*" capture="environment">
+  </div>
+
+  <div class="analyzing" id="analyzing">
+    <img class="thumb" id="thumbPreview" alt="">
+    <div class="stamp-pulse"></div>
+    <div class="msg">解析中…料理を読み取っています</div>
+  </div>
+
+  <div class="receipt" id="receipt">
+    <span class="stampmark">記録済</span>
+    <h2 id="foodName">-</h2>
+    <div class="row main"><span class="k">カロリー</span><span class="v" id="rCalories">- kcal</span></div>
+    <div class="row"><span class="k">たんぱく質</span><span class="v" id="rProtein">- g</span></div>
+    <div class="row"><span class="k">脂質</span><span class="v" id="rFat">- g</span></div>
+    <div class="row"><span class="k">炭水化物</span><span class="v" id="rCarbs">- g</span></div>
+    <div class="note" id="rNote"></div>
+  </div>
+
+  <div class="errorbox" id="errorbox">
+    <strong>記録できませんでした</strong>
+    <span id="errorMsg"></span>
+    <div><button id="retryBtn">もう一度撮影する</button></div>
+  </div>
+
+  <div class="history">
+    <h3>本日の記録</h3>
+    <ul id="historyList"></ul>
+    <div class="empty" id="historyEmpty">まだ記録がありません</div>
+  </div>
+</div>
+
+<script>
+// ============================================================
+// ここをGASのWebアプリ公開URL（.../exec）に書き換えてください
+// ============================================================
+const GAS_EXEC_URL = 'https://script.google.com/macros/s/AKfycbzHLbZzMjTqCuLsTp6QJWdGETWzJ7XNcI87VBA9anlFp-rziCQH4XosWBNo9j2sX80qyg/exec';
+
+const $ = (id) => document.getElementById(id);
+
+function init(){
+  if (!GAS_EXEC_URL || GAS_EXEC_URL.indexOf('xxxxxxxxxxxxxxxxxxxxxxxx') !== -1) {
+    $('configwarn').classList.add('show');
+  }
+  $('captureBtn').addEventListener('click', () => $('fileInput').click());
+  $('fileInput').addEventListener('change', onFileSelected);
+  $('retryBtn').addEventListener('click', resetToCapture);
+  loadTodayRecords();
+}
+
+function resetToCapture(){
+  $('errorbox').classList.remove('show');
+  $('receipt').classList.remove('show');
+  $('fileInput').value = '';
+}
+
+async function onFileSelected(ev){
+  const file = ev.target.files && ev.target.files[0];
+  if (!file) return;
+
+  $('errorbox').classList.remove('show');
+  $('receipt').classList.remove('show');
+
+  try {
+    const { base64, mimeType, previewUrl } = await compressImage(file);
+    $('thumbPreview').src = previewUrl;
+    $('analyzing').classList.add('show');
+
+    const result = await uploadMeal(base64, mimeType);
+
+    $('analyzing').classList.remove('show');
+    showReceipt(result.data);
+    await loadTodayRecords();
+  } catch (err) {
+    $('analyzing').classList.remove('show');
+    showError(err.message || '不明なエラーが発生しました');
+  }
+}
+
+/** 画像を最大1024pxに縮小し、base64(JPEG)を生成する（通信量・トークン削減のため） */
+function compressImage(file){
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error('画像の読み込みに失敗しました'));
+    reader.onload = () => {
+      const img = new Image();
+      img.onerror = () => reject(new Error('画像の読み込みに失敗しました'));
+      img.onload = () => {
+        const MAX = 1024;
+        let { width, height } = img;
+        if (width > MAX || height > MAX) {
+          const scale = MAX / Math.max(width, height);
+          width = Math.round(width * scale);
+          height = Math.round(height * scale);
+        }
+        const canvas = document.createElement('canvas');
+        canvas.width = width; canvas.height = height;
+        canvas.getContext('2d').drawImage(img, 0, 0, width, height);
+        const dataUrl = canvas.toDataURL('image/jpeg', 0.85);
+        resolve({
+          base64: dataUrl.split(',')[1],
+          mimeType: 'image/jpeg',
+          previewUrl: dataUrl
+        });
+      };
+      img.src = reader.result;
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+/** GASへPOST（text/plainでCORSプリフライトを回避） */
+async function uploadMeal(base64, mimeType){
+  const res = await fetch(GAS_EXEC_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+    body: JSON.stringify({ image: base64, mimeType })
+  });
+  if (!res.ok) throw new Error('サーバーへの接続に失敗しました (HTTP ' + res.status + ')');
+  const json = await res.json();
+  if (json.status !== 'success') throw new Error(json.message || '解析に失敗しました');
+  return json;
+}
+
+function showReceipt(data){
+  $('foodName').textContent = data.foodName;
+  $('rCalories').textContent = data.calories + ' kcal';
+  $('rProtein').textContent = data.protein + ' g';
+  $('rFat').textContent = data.fat + ' g';
+  $('rCarbs').textContent = data.carbs + ' g';
+  $('rNote').textContent = data.note ? '※ ' + data.note : '';
+  $('receipt').classList.add('show');
+}
+
+function showError(message){
+  $('errorMsg').textContent = message;
+  $('errorbox').classList.add('show');
+}
+
+async function loadTodayRecords(){
+  if (!GAS_EXEC_URL || GAS_EXEC_URL.indexOf('xxxxxxxxxxxxxxxxxxxxxxxx') !== -1) return;
+  try {
+    const res = await fetch(GAS_EXEC_URL, { method: 'GET' });
+    const json = await res.json();
+    if (json.status !== 'success') return;
+    renderHistory(json.data);
+  } catch (err) {
+    // 履歴取得の失敗は静かに無視（記録自体は成功しているため）
+    console.warn('履歴の取得に失敗しました', err);
+  }
+}
+
+function renderHistory(records){
+  const list = $('historyList');
+  list.innerHTML = '';
+
+  if (!records.length) {
+    $('historyEmpty').style.display = 'block';
+    $('totalKcal').textContent = '0';
+    return;
+  }
+  $('historyEmpty').style.display = 'none';
+
+  let total = 0;
+  records.forEach((r) => {
+    total += Number(r.calories) || 0;
+    const li = document.createElement('li');
+    li.innerHTML =
+      '<span class="time">' + (r.time || '').substring(0,5) + '</span>' +
+      '<span class="name">' + escapeHtml(r.foodName) + '</span>' +
+      '<span class="kcal">' + r.calories + ' kcal</span>';
+    list.appendChild(li);
+  });
+  $('totalKcal').textContent = total;
+}
+
+function escapeHtml(str){
+  const div = document.createElement('div');
+  div.textContent = str == null ? '' : String(str);
+  return div.innerHTML;
+}
+
+init();
+</script>
+</body>
+</html>
