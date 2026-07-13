@@ -510,6 +510,10 @@ function handleUpdateMealPost_(payload) {
   const rowIndex = findRowIndexByIdAndEmail_(sheet, id, session.email, 0, 1);
   if (!rowIndex) throw new Error('対象の記録が見つかりませんでした');
 
+  const date = String(payload.date || '').trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) throw new Error('日付を正しく指定してください');
+  const time = normalizeTime_(payload.time);
+
   const foodName = String(payload.foodName || '').trim().substring(0, 40);
   const calories = Math.round(Number(payload.calories) || 0);
   const protein = roundTo1_(payload.protein);
@@ -519,9 +523,9 @@ function handleUpdateMealPost_(payload) {
   if (!foodName) throw new Error('料理名を入力してください');
   if (calories < 0 || calories > 5000) throw new Error('カロリーを正しく入力してください（0〜5000kcal）');
 
-  sheet.getRange(rowIndex, 5, 1, 5).setValues([[foodName, calories, protein, fat, carbs]]);
+  sheet.getRange(rowIndex, 3, 1, 7).setValues([[date, time, foodName, calories, protein, fat, carbs]]);
 
-  return { status: 'success', data: { id: id } };
+  return { status: 'success', data: { id: id, date: date, time: time } };
 }
 
 function handleDeleteMealPost_(payload) {
@@ -542,15 +546,22 @@ function handleUpdateWeightPost_(payload) {
   const id = String(payload.id || '');
   if (!id) throw new Error('対象のIDが指定されていません');
 
-  const weightKg = Math.round(Number(payload.weightKg) * 10) / 10;
-  if (!weightKg || weightKg < 20 || weightKg > 300) throw new Error('体重を正しく入力してください（20〜300kg）');
-
   const sheet = getOrCreateSheet_(WEIGHT_SHEET_NAME, WEIGHT_HEADER);
   const rowIndex = findRowIndexByIdAndEmail_(sheet, id, session.email, 0, 1);
   if (!rowIndex) throw new Error('対象の記録が見つかりませんでした');
 
-  sheet.getRange(rowIndex, 4, 1, 1).setValue(weightKg);
-  return { status: 'success', data: { id: id, weightKg: weightKg } };
+  const date = String(payload.date || '').trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) throw new Error('日付を正しく指定してください');
+
+  const weightKg = Math.round(Number(payload.weightKg) * 10) / 10;
+  if (!weightKg || weightKg < 20 || weightKg > 300) throw new Error('体重を正しく入力してください（20〜300kg）');
+
+  if (isDateTakenByOtherRow_(sheet, session.email, date, rowIndex)) {
+    throw new Error('その日付には既に別の体重記録があります。日付を変更する場合は、先にその日の記録を削除してください。');
+  }
+
+  sheet.getRange(rowIndex, 3, 1, 2).setValues([[date, weightKg]]);
+  return { status: 'success', data: { id: id, date: date, weightKg: weightKg } };
 }
 
 function handleDeleteWeightPost_(payload) {
@@ -564,6 +575,31 @@ function handleDeleteWeightPost_(payload) {
 
   sheet.deleteRow(rowIndex);
   return { status: 'success', data: { id: id } };
+}
+
+/**
+ * 同じユーザーの他の行に、指定した日付の体重記録が既に存在するかを調べる
+ * （体重は1日1件のため、日付変更時の重複を防ぐ）
+ */
+function isDateTakenByOtherRow_(sheet, email, dateStr, excludeRowIndex) {
+  if (sheet.getLastRow() < 2) return false;
+  const values = sheet.getRange(2, 1, sheet.getLastRow() - 1, 3).getValues();
+  for (let i = 0; i < values.length; i++) {
+    const rowIndex = i + 2;
+    if (rowIndex === excludeRowIndex) continue;
+    if (values[i][1] === email && values[i][2] === dateStr) return true;
+  }
+  return false;
+}
+
+/**
+ * "HH:mm" または "HH:mm:ss" を "HH:mm:ss" に正規化する。不正な値は現在時刻で代用する。
+ */
+function normalizeTime_(time) {
+  const t = String(time || '').trim();
+  if (/^\d{2}:\d{2}:\d{2}$/.test(t)) return t;
+  if (/^\d{2}:\d{2}$/.test(t)) return t + ':00';
+  return Utilities.formatDate(new Date(), 'Asia/Tokyo', 'HH:mm:ss');
 }
 
 function findRowIndexByIdAndEmail_(sheet, id, email, idColIdx, emailColIdx) {

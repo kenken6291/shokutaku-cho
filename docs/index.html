@@ -281,7 +281,8 @@
   .edit-item-actions .linklike{font-size:11px;}
 
   .edit-item-form{margin-top:10px;}
-  .edit-item-form input[type="text"], .edit-item-form input[type="number"]{
+  .edit-item-form input[type="text"], .edit-item-form input[type="number"],
+  .edit-item-form input[type="date"], .edit-item-form input[type="time"]{
     width:100%;font-size:14px;padding:8px 9px;margin-bottom:8px;
     border:1px solid var(--paper-line);border-radius:4px;background:#fff;color:var(--ink);font-family:inherit;
   }
@@ -1387,6 +1388,10 @@ function showMealEditForm(li, m){
   const form = document.createElement('div');
   form.className = 'edit-item-form';
   form.innerHTML =
+    '<div class="ef-row">' +
+      '<input type="date" class="ef-date">' +
+      '<input type="time" class="ef-time">' +
+    '</div>' +
     '<input type="text" class="ef-name" maxlength="40">' +
     '<div class="ef-row">' +
       '<input type="number" class="ef-cal" placeholder="kcal">' +
@@ -1401,6 +1406,8 @@ function showMealEditForm(li, m){
     '</div>';
   li.appendChild(form);
 
+  form.querySelector('.ef-date').value = m.date;
+  form.querySelector('.ef-time').value = String(m.time || '').substring(0, 5);
   form.querySelector('.ef-name').value = m.foodName;
   form.querySelector('.ef-cal').value = m.calories;
   form.querySelector('.ef-p').value = m.protein;
@@ -1409,15 +1416,18 @@ function showMealEditForm(li, m){
 
   form.querySelector('.ef-cancel').addEventListener('click', () => { form.remove(); view.style.display = ''; });
   form.querySelector('.ef-save').addEventListener('click', async () => {
+    const date = form.querySelector('.ef-date').value;
+    const time = form.querySelector('.ef-time').value;
     const foodName = form.querySelector('.ef-name').value.trim();
     const calories = Number(form.querySelector('.ef-cal').value);
     const protein = Number(form.querySelector('.ef-p').value);
     const fat = Number(form.querySelector('.ef-f').value);
     const carbs = Number(form.querySelector('.ef-c').value);
+    if (!date) { form.querySelector('.ef-error').textContent = '日付を入力してください'; return; }
     if (!foodName) { form.querySelector('.ef-error').textContent = '料理名を入力してください'; return; }
 
     try {
-      await postToGas({ type: 'updateMeal', token: currentToken, id: m.id, foodName, calories, protein, fat, carbs });
+      await postToGas({ type: 'updateMeal', token: currentToken, id: m.id, date, time, foodName, calories, protein, fat, carbs });
       await loadFullHistory();
       await loadDashboard();
     } catch (err) {
@@ -1474,24 +1484,27 @@ function showWeightEditForm(li, w){
   const form = document.createElement('div');
   form.className = 'edit-item-form';
   form.innerHTML =
-    '<div class="ef-row"><input type="number" class="ef-weight" step="0.1" placeholder="kg"></div>' +
+    '<div class="ef-row"><input type="date" class="ef-date"><input type="number" class="ef-weight" step="0.1" placeholder="kg"></div>' +
     '<div class="forminline-error ef-error"></div>' +
     '<div class="ef-actions">' +
       '<button class="ef-cancel">キャンセル</button>' +
       '<button class="ef-save">保存</button>' +
     '</div>';
   li.appendChild(form);
+  form.querySelector('.ef-date').value = w.date;
   form.querySelector('.ef-weight').value = w.weightKg;
 
   form.querySelector('.ef-cancel').addEventListener('click', () => { form.remove(); view.style.display = ''; });
   form.querySelector('.ef-save').addEventListener('click', async () => {
+    const date = form.querySelector('.ef-date').value;
     const weightKg = Number(form.querySelector('.ef-weight').value);
+    if (!date) { form.querySelector('.ef-error').textContent = '日付を入力してください'; return; }
     if (!weightKg || weightKg < 20 || weightKg > 300) {
       form.querySelector('.ef-error').textContent = '体重を正しく入力してください';
       return;
     }
     try {
-      await postToGas({ type: 'updateWeight', token: currentToken, id: w.id, weightKg: weightKg });
+      await postToGas({ type: 'updateWeight', token: currentToken, id: w.id, date: date, weightKg: weightKg });
       await loadFullHistory();
       await loadDashboard();
     } catch (err) {
