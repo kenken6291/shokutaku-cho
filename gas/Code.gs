@@ -1,48 +1,53 @@
 /**
  * ==============================================================
- * 摂取カロリー・からだ記録システム - GAS バックエンド
+ * 食卓帳 - GAS バックエンド（メール認証版）
  * ==============================================================
  *
  * 【できること】
- *   1. 食事写真からAIでカロリー・PFCを解析してスプレッドシートに記録（複数人対応）
- *   2. 性別・年齢・身長・活動レベルからなる「からだプロフィール」を保存
- *   3. 体重を記録（1日1件、当日分は上書き更新）
- *   4. 基礎代謝（BMR）・消費エネルギー目安（TDEE）・本日のエネルギー収支を算出
- *      → 基礎代謝基準値・身体活動レベルは、厚生労働省「日本人の食事摂取基準（2020年版）」の
- *        公表値を使用しています。あくまで目安であり、個人差があります。
- *   5. 「100日チャレンジ」：開始日から100日間の進捗・継続記録日数・連続記録日数を
- *      成長するキャラクターと一緒に表示し、25/50/75/100%達成時に自分で決めたメッセージを表示
+ *   1. メールアドレス登録 → 仮パスワードをメール送信 → 初回ログイン時にパスワード変更必須
+ *   2. 表示用ニックネーム（登録後も変更可能）
+ *   3. 利用規約・免責事項への同意をもって登録完了
+ *   4. 食事写真からAIでカロリー・PFCを解析してスプレッドシートに記録
+ *   5. 性別・年齢・身長・活動レベルからなる「からだプロフィール」、体重記録、基礎代謝(BMR)・
+ *      消費エネルギー目安(TDEE)の算出（厚生労働省「日本人の食事摂取基準（2020年版）」準拠）
+ *   6. 「100日チャレンジ」：進捗・継続記録日数・連続記録日数を育つキャラクターと共に表示
+ *   7. 食事・体重の履歴一覧表示、修正・削除
+ *   8. アカウント設定（ニックネーム変更・パスワード変更・アカウント削除）
  *
  * 【事前設定】スクリプトプロパティ（プロジェクトの設定 > スクリプト プロパティ）
  *   GEMINI_API_KEY  : Google AI Studio で発行したGemini APIキー（必須）
  *   SHEET_ID        : 記録先スプレッドシートのID（未設定ならバインド先スプレッドシートを使用）
  *   DRIVE_FOLDER_ID : 食事写真を保存するGoogle DriveフォルダID（任意）
+ *   PASSWORD_PEPPER : パスワードハッシュ化に使う秘密文字列（必須・自分で決めた適当な長い文字列でOK）
  *
  * 【Webアプリのデプロイ設定】
  *   実行するユーザー: 自分（スクリプト所有者）
  *   アクセスできるユーザー: 全員（匿名ユーザーを含む）
+ *
+ * 【注意】この版から識別キーが「ニックネーム」から「メールアドレス」に変わりました。
+ * 　　　　以前のバージョンでニックネームのみで記録したデータとは紐付きません。
  * ==============================================================
  */
 
 const MEAL_SHEET_NAME = '摂取カロリー記録';
 const PROFILE_SHEET_NAME = 'プロフィール';
 const WEIGHT_SHEET_NAME = '体重記録';
-const USER_SHEET_NAME = '利用者一覧';
+const USER_SHEET_NAME = 'ユーザー';
 const CHALLENGE_SHEET_NAME = 'チャレンジ';
 const DIARY_SHEET_NAME = 'ひとこと日記';
 const GEMINI_MODEL = 'gemini-3.5-flash'; // 現行の安定版フラッグシップモデル（2026年7月時点）
 const CHALLENGE_TOTAL_DAYS = 100;
+const MIN_PASSWORD_LENGTH = 8;
 
-const MEAL_HEADER = ['名前', '日付', '時刻', '料理名', 'カロリー(kcal)', 'たんぱく質(g)', '脂質(g)', '炭水化物(g)', '画像URL', '備考'];
-const PROFILE_HEADER = ['名前', '性別', '年齢', '身長(cm)', '活動レベル', '更新日時'];
-const WEIGHT_HEADER = ['名前', '日付', '体重(kg)', '登録時刻'];
-const USER_HEADER = ['名前', '登録日時'];
-const CHALLENGE_HEADER = ['名前', '開始日', 'メッセージ25', 'メッセージ50', 'メッセージ75', 'メッセージ100', '更新日時'];
-const DIARY_HEADER = ['名前', '日付', 'ひとこと'];
+const MEAL_HEADER = ['ID', 'メールアドレス', '日付', '時刻', '料理名', 'カロリー(kcal)', 'たんぱく質(g)', '脂質(g)', '炭水化物(g)', '画像URL', '備考'];
+const PROFILE_HEADER = ['メールアドレス', '性別', '年齢', '身長(cm)', '活動レベル', '更新日時'];
+const WEIGHT_HEADER = ['ID', 'メールアドレス', '日付', '体重(kg)', '登録時刻'];
+const USER_HEADER = ['メールアドレス', 'パスワードハッシュ', 'ソルト', 'ニックネーム', '仮パスワード', 'セッショントークン', '規約同意日時', '登録日時', '更新日時'];
+const CHALLENGE_HEADER = ['メールアドレス', '開始日', 'メッセージ25', 'メッセージ50', 'メッセージ75', 'メッセージ100', '更新日時'];
+const DIARY_HEADER = ['メールアドレス', '日付', 'ひとこと'];
 
 /**
- * 基礎代謝基準値（kcal/kg体重/日）
- * 出典: 厚生労働省「日本人の食事摂取基準（2020年版）」
+ * 基礎代謝基準値（kcal/kg体重/日） 出典: 厚生労働省「日本人の食事摂取基準（2020年版）」
  */
 const BMR_TABLE = [
   { min: 1, max: 2, male: 61.0, female: 59.7 },
@@ -59,8 +64,7 @@ const BMR_TABLE = [
 ];
 
 /**
- * 身体活動レベル（低い/ふつう/高い）
- * 出典: 厚生労働省「日本人の食事摂取基準（2020年版）」
+ * 身体活動レベル（低い/ふつう/高い） 出典: 厚生労働省「日本人の食事摂取基準（2020年版）」
  * 75歳以上は「高い」区分が設定されていないため、該当時は「ふつう」の値で代用する。
  */
 const PAL_TABLE = [
@@ -86,11 +90,8 @@ const PAL_TABLE = [
 
 /**
  * POSTリクエストを種別ごとに振り分ける。
- * リクエストボディ(JSON): { "type": "meal" | "profile" | "weight" | "register" | "challenge" | "diary", ... }
- * type省略時は "meal" として扱う（後方互換）。
- *
- * ブラウザからのCORSプリフライトを避けるため、クライアント側は
- * Content-Type: text/plain で送信すること。
+ * リクエストボディ(JSON): { "type": "...", ... }
+ * ブラウザからのCORSプリフライトを避けるため、クライアント側は Content-Type: text/plain で送信すること。
  */
 function doPost(e) {
   const output = ContentService.createTextOutput().setMimeType(ContentService.MimeType.JSON);
@@ -100,23 +101,25 @@ function doPost(e) {
       throw new Error('リクエストボディが空です');
     }
     const payload = JSON.parse(e.postData.contents);
-    const type = payload.type || 'meal';
-
     let result;
-    if (type === 'meal') {
-      result = handleMealPost_(payload);
-    } else if (type === 'profile') {
-      result = handleProfilePost_(payload);
-    } else if (type === 'weight') {
-      result = handleWeightPost_(payload);
-    } else if (type === 'register') {
-      result = handleRegisterPost_(payload);
-    } else if (type === 'challenge') {
-      result = handleChallengePost_(payload);
-    } else if (type === 'diary') {
-      result = handleDiaryPost_(payload);
-    } else {
-      throw new Error('不明なリクエスト種別です: ' + type);
+
+    switch (payload.type) {
+      case 'signup': result = handleSignupPost_(payload); break;
+      case 'login': result = handleLoginPost_(payload); break;
+      case 'changePassword': result = handleChangePasswordPost_(payload); break;
+      case 'updateNickname': result = handleUpdateNicknamePost_(payload); break;
+      case 'deleteAccount': result = handleDeleteAccountPost_(payload); break;
+      case 'logout': result = handleLogoutPost_(payload); break;
+      case 'meal': result = handleMealPost_(payload); break;
+      case 'profile': result = handleProfilePost_(payload); break;
+      case 'weight': result = handleWeightPost_(payload); break;
+      case 'challenge': result = handleChallengePost_(payload); break;
+      case 'diary': result = handleDiaryPost_(payload); break;
+      case 'updateMeal': result = handleUpdateMealPost_(payload); break;
+      case 'deleteMeal': result = handleDeleteMealPost_(payload); break;
+      case 'updateWeight': result = handleUpdateWeightPost_(payload); break;
+      case 'deleteWeight': result = handleDeleteWeightPost_(payload); break;
+      default: throw new Error('不明なリクエスト種別です: ' + payload.type);
     }
 
     output.setContent(JSON.stringify(result));
@@ -128,16 +131,32 @@ function doPost(e) {
 }
 
 /**
- * ダッシュボード情報を取得する。
- * クエリパラメータ: ?userName=ニックネーム
- * 返す内容: プロフィール・最新体重・本日の食事記録・カロリー合計・基礎代謝・消費目安・収支
+ * データ取得。クエリパラメータ:
+ *   ?token=セッショントークン&action=dashboard  … 本日のダッシュボード（既定）
+ *   ?token=セッショントークン&action=history    … 食事・体重の全履歴
  */
 function doGet(e) {
   const output = ContentService.createTextOutput().setMimeType(ContentService.MimeType.JSON);
 
   try {
-    const userName = sanitizeUserName_(e && e.parameter && e.parameter.userName);
-    const data = userName ? buildDashboard_(userName) : emptyDashboard_();
+    const token = e && e.parameter && e.parameter.token;
+    const action = (e && e.parameter && e.parameter.action) || 'dashboard';
+
+    if (!token) {
+      const empty = action === 'history' ? { meals: [], weights: [] } : emptyDashboard_();
+      output.setContent(JSON.stringify({ status: 'success', data: empty }));
+      return output;
+    }
+
+    const session = resolveSession_(token);
+    let data;
+    if (action === 'history') {
+      data = buildHistory_(session.email);
+    } else {
+      data = buildDashboard_(session.email);
+      data.nickname = session.nickname;
+    }
+
     output.setContent(JSON.stringify({ status: 'success', data: data }));
   } catch (err) {
     output.setContent(JSON.stringify({ status: 'error', message: err.message }));
@@ -148,16 +167,257 @@ function doGet(e) {
 
 /**
  * ==============================================================
- * POSTハンドラ
+ * 認証（登録・ログイン・パスワード変更・ニックネーム変更・アカウント削除）
+ * ==============================================================
+ */
+
+function handleSignupPost_(payload) {
+  const email = sanitizeEmail_(payload.email);
+  if (!isValidEmail_(email)) throw new Error('メールアドレスの形式が正しくありません');
+
+  const nickname = sanitizeNickname_(payload.nickname);
+  if (!nickname) throw new Error('ニックネームを入力してください');
+
+  if (payload.agreeTerms !== true) throw new Error('利用規約・免責事項へのご同意が必要です');
+
+  const sheet = getOrCreateSheet_(USER_SHEET_NAME, USER_HEADER);
+  if (findRowIndexByKey_(sheet, email)) {
+    throw new Error('このメールアドレスは既に登録されています');
+  }
+  if (isNicknameTakenByOther_(nickname, null)) {
+    throw new Error('そのニックネームは既に使われています。別の名前をお試しください。');
+  }
+
+  const tempPassword = generateTempPassword_();
+  const salt = generateSalt_();
+  const hash = hashPassword_(tempPassword, salt);
+  const now = nowStr_();
+
+  sheet.appendRow([email, hash, salt, nickname, 'TRUE', '', now, now, now]);
+
+  try {
+    sendTempPasswordEmail_(email, tempPassword);
+  } catch (mailErr) {
+    // メール送信に失敗した場合は登録行を削除し、再登録できるようにする
+    const rowIndex = findRowIndexByKey_(sheet, email);
+    if (rowIndex) sheet.deleteRow(rowIndex);
+    throw new Error('確認メールの送信に失敗しました。しばらくしてから再度お試しください。');
+  }
+
+  return { status: 'success', data: { email: email } };
+}
+
+function handleLoginPost_(payload) {
+  const email = sanitizeEmail_(payload.email);
+  const password = String(payload.password || '');
+  if (!email || !password) throw new Error('メールアドレスとパスワードを入力してください');
+
+  const sheet = getOrCreateSheet_(USER_SHEET_NAME, USER_HEADER);
+  const rowIndex = findRowIndexByKey_(sheet, email);
+  if (!rowIndex) throw new Error('メールアドレスまたはパスワードが正しくありません');
+
+  const row = sheet.getRange(rowIndex, 1, 1, USER_HEADER.length).getValues()[0];
+  const storedHash = row[1], salt = row[2], nickname = row[3], mustChange = row[4] === 'TRUE';
+
+  if (hashPassword_(password, salt) !== storedHash) {
+    throw new Error('メールアドレスまたはパスワードが正しくありません');
+  }
+
+  if (mustChange) {
+    return { status: 'success', data: { requirePasswordChange: true, email: email } };
+  }
+
+  const token = generateToken_();
+  sheet.getRange(rowIndex, 6, 1, 1).setValue(token);
+  sheet.getRange(rowIndex, 9, 1, 1).setValue(nowStr_());
+
+  return { status: 'success', data: { token: token, nickname: nickname, email: email } };
+}
+
+/**
+ * パスワード変更。初回ログイン時の強制変更（email指定）・アカウント設定からの任意変更（token指定）の両方に対応。
+ * いずれの場合も現在のパスワード（初回は仮パスワード）の確認を必須とする。
+ */
+function handleChangePasswordPost_(payload) {
+  const newPassword = String(payload.newPassword || '');
+  if (newPassword.length < MIN_PASSWORD_LENGTH) {
+    throw new Error('新しいパスワードは' + MIN_PASSWORD_LENGTH + '文字以上で入力してください');
+  }
+
+  const sheet = getOrCreateSheet_(USER_SHEET_NAME, USER_HEADER);
+  let rowIndex, email;
+
+  if (payload.token) {
+    const session = resolveSession_(payload.token);
+    rowIndex = session.rowIndex;
+    email = session.email;
+  } else {
+    email = sanitizeEmail_(payload.email);
+    rowIndex = findRowIndexByKey_(sheet, email);
+  }
+  if (!rowIndex) throw new Error('現在のパスワードが正しくありません');
+
+  const row = sheet.getRange(rowIndex, 1, 1, USER_HEADER.length).getValues()[0];
+  const currentPassword = String(payload.currentPassword || '');
+  if (hashPassword_(currentPassword, row[2]) !== row[1]) {
+    throw new Error('現在のパスワードが正しくありません');
+  }
+
+  const newSalt = generateSalt_();
+  const newHash = hashPassword_(newPassword, newSalt);
+  const newToken = generateToken_();
+  const now = nowStr_();
+
+  sheet.getRange(rowIndex, 2, 1, 1).setValue(newHash);
+  sheet.getRange(rowIndex, 3, 1, 1).setValue(newSalt);
+  sheet.getRange(rowIndex, 5, 1, 1).setValue('FALSE');
+  sheet.getRange(rowIndex, 6, 1, 1).setValue(newToken);
+  sheet.getRange(rowIndex, 9, 1, 1).setValue(now);
+
+  const nickname = row[3];
+  return { status: 'success', data: { token: newToken, nickname: nickname, email: email } };
+}
+
+function handleUpdateNicknamePost_(payload) {
+  const session = resolveSession_(payload.token);
+  const nickname = sanitizeNickname_(payload.nickname);
+  if (!nickname) throw new Error('ニックネームを入力してください');
+
+  if (isNicknameTakenByOther_(nickname, session.email)) {
+    throw new Error('そのニックネームは既に使われています。別の名前をお試しください。');
+  }
+
+  const sheet = getOrCreateSheet_(USER_SHEET_NAME, USER_HEADER);
+  sheet.getRange(session.rowIndex, 4, 1, 1).setValue(nickname);
+  sheet.getRange(session.rowIndex, 9, 1, 1).setValue(nowStr_());
+
+  return { status: 'success', data: { nickname: nickname } };
+}
+
+/**
+ * アカウントを削除する。ユーザーの認証情報のみ削除し、過去の食事・体重等の記録データは残す
+ * （同じメールアドレスで再登録した場合に履歴として復元されるようにするため）。
+ */
+function handleDeleteAccountPost_(payload) {
+  const session = resolveSession_(payload.token);
+  const sheet = getOrCreateSheet_(USER_SHEET_NAME, USER_HEADER);
+  sheet.deleteRow(session.rowIndex);
+  return { status: 'success', data: {} };
+}
+
+function handleLogoutPost_(payload) {
+  try {
+    const session = resolveSession_(payload.token);
+    const sheet = getOrCreateSheet_(USER_SHEET_NAME, USER_HEADER);
+    sheet.getRange(session.rowIndex, 6, 1, 1).setValue('');
+  } catch (err) {
+    // トークンが既に無効でもエラーにはしない
+  }
+  return { status: 'success', data: {} };
+}
+
+/**
+ * トークンからユーザー（メールアドレス・ニックネーム・行番号）を特定する。
+ */
+function resolveSession_(token) {
+  if (!token) throw new Error('ログインが必要です');
+  const sheet = getOrCreateSheet_(USER_SHEET_NAME, USER_HEADER);
+  if (sheet.getLastRow() < 2) throw new Error('セッションが無効です。再度ログインしてください');
+
+  const values = sheet.getRange(2, 1, sheet.getLastRow() - 1, USER_HEADER.length).getValues();
+  for (let i = 0; i < values.length; i++) {
+    if (values[i][5] && values[i][5] === token) {
+      return { rowIndex: i + 2, email: values[i][0], nickname: values[i][3] };
+    }
+  }
+  throw new Error('セッションが無効です。再度ログインしてください');
+}
+
+function isNicknameTakenByOther_(nickname, excludeEmail) {
+  const sheet = getOrCreateSheet_(USER_SHEET_NAME, USER_HEADER);
+  if (sheet.getLastRow() < 2) return false;
+
+  const values = sheet.getRange(2, 1, sheet.getLastRow() - 1, USER_HEADER.length).getValues();
+  const normalized = nickname.toLowerCase();
+  return values.some(function (row) {
+    if (excludeEmail && row[0] === excludeEmail) return false;
+    return String(row[3] || '').toLowerCase() === normalized;
+  });
+}
+
+/**
+ * ==============================================================
+ * パスワード・トークン ユーティリティ
+ * ==============================================================
+ */
+
+function getPasswordPepper_() {
+  const pepper = PropertiesService.getScriptProperties().getProperty('PASSWORD_PEPPER');
+  if (!pepper) throw new Error('スクリプトプロパティに PASSWORD_PEPPER が設定されていません');
+  return pepper;
+}
+
+function hashPassword_(password, salt) {
+  const pepper = getPasswordPepper_();
+  const bytes = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, password + ':' + salt + ':' + pepper);
+  return bytes.map(function (b) { return ('0' + ((b + 256) % 256).toString(16)).slice(-2); }).join('');
+}
+
+function generateSalt_() {
+  return Utilities.getUuid();
+}
+
+function generateToken_() {
+  return Utilities.getUuid() + Utilities.getUuid();
+}
+
+function generateTempPassword_() {
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789'; // 紛らわしい0/O,1/l/I等は除外
+  let pw = '';
+  for (let i = 0; i < 10; i++) {
+    pw += chars.charAt(Math.floor(Math.random() * chars.length));
+  }
+  return pw;
+}
+
+function sendTempPasswordEmail_(email, tempPassword) {
+  const subject = '【食卓帳】仮パスワードのお知らせ';
+  const body =
+    '食卓帳にご登録いただきありがとうございます。\n\n' +
+    '以下の仮パスワードでログインしてください。ログイン後、新しいパスワードの設定をお願いします。\n\n' +
+    '仮パスワード: ' + tempPassword + '\n\n' +
+    'このメールに心当たりがない場合は、このメールを破棄していただいて問題ありません。';
+  MailApp.sendEmail(email, subject, body);
+}
+
+function sanitizeEmail_(email) {
+  if (!email) return '';
+  return String(email).trim().toLowerCase().substring(0, 100);
+}
+
+function isValidEmail_(email) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+}
+
+function sanitizeNickname_(name) {
+  if (!name) return '';
+  const trimmed = String(name).trim().replace(/[\r\n\t]/g, '');
+  return trimmed.substring(0, 20);
+}
+
+/**
+ * ==============================================================
+ * POSTハンドラ（記録系：食事・からだ・体重・チャレンジ・ひとこと）
  * ==============================================================
  */
 
 function handleMealPost_(payload) {
+  const session = resolveSession_(payload.token);
+  const email = session.email;
+
   const base64Image = payload.image;
   const mimeType = payload.mimeType || 'image/jpeg';
-  const userName = sanitizeUserName_(payload.userName);
 
-  if (!userName) throw new Error('ユーザー名が指定されていません');
   if (!base64Image) throw new Error('画像データが送信されていません');
   if (['image/jpeg', 'image/png', 'image/webp', 'image/heic'].indexOf(mimeType) === -1) {
     throw new Error('対応していない画像形式です: ' + mimeType);
@@ -167,19 +427,18 @@ function handleMealPost_(payload) {
 
   let imageUrl = '';
   try {
-    imageUrl = saveImageToDrive_(base64Image, mimeType, userName);
+    imageUrl = saveImageToDrive_(base64Image, mimeType, email);
   } catch (driveErr) {
     console.warn('Driveへの画像保存に失敗しました: ' + driveErr.message);
   }
 
-  appendMealRecord_(userName, analysis, imageUrl);
+  const id = appendMealRecord_(email, analysis, imageUrl);
 
-  return { status: 'success', data: analysis, imageUrl: imageUrl };
+  return { status: 'success', data: analysis, imageUrl: imageUrl, id: id };
 }
 
 function handleProfilePost_(payload) {
-  const userName = sanitizeUserName_(payload.userName);
-  if (!userName) throw new Error('ユーザー名が指定されていません');
+  const session = resolveSession_(payload.token);
 
   const sex = payload.sex === 'male' ? 'male' : (payload.sex === 'female' ? 'female' : null);
   const age = Math.round(Number(payload.age));
@@ -190,65 +449,27 @@ function handleProfilePost_(payload) {
   if (!age || age < 1 || age > 120) throw new Error('年齢を正しく入力してください（1〜120）');
   if (!heightCm || heightCm < 50 || heightCm > 250) throw new Error('身長を正しく入力してください（50〜250cm）');
 
-  upsertProfile_(userName, sex, age, heightCm, palLevel);
+  upsertProfile_(session.email, sex, age, heightCm, palLevel);
 
   return { status: 'success', data: { sex: sex, age: age, heightCm: heightCm, palLevel: palLevel } };
 }
 
 function handleWeightPost_(payload) {
-  const userName = sanitizeUserName_(payload.userName);
-  if (!userName) throw new Error('ユーザー名が指定されていません');
+  const session = resolveSession_(payload.token);
 
   const weightKg = Math.round(Number(payload.weightKg) * 10) / 10;
   if (!weightKg || weightKg < 20 || weightKg > 300) throw new Error('体重を正しく入力してください（20〜300kg）');
 
-  upsertWeightToday_(userName, weightKg);
+  const id = upsertWeightToday_(session.email, weightKg);
 
-  return { status: 'success', data: { weightKg: weightKg } };
+  return { status: 'success', data: { weightKg: weightKg, id: id } };
 }
 
-/**
- * ニックネームを新規登録する。既に使われているニックネームは拒否する。
- * （既にlocalStorageに保存済みの自分の名前で再訪問する場合はこのAPIは呼ばれない）
- */
-function handleRegisterPost_(payload) {
-  const userName = sanitizeUserName_(payload.userName);
-  if (!userName) throw new Error('ニックネームを入力してください');
-
-  if (isUserNameTaken_(userName)) {
-    throw new Error('そのニックネームは既に使われています。別の名前をお試しください。');
-  }
-
-  registerUserName_(userName);
-  return { status: 'success', data: { userName: userName } };
-}
-
-function isUserNameTaken_(userName) {
-  const sheet = getOrCreateSheet_(USER_SHEET_NAME, USER_HEADER);
-  if (sheet.getLastRow() < 2) return false;
-
-  const names = sheet.getRange(2, 1, sheet.getLastRow() - 1, 1).getValues();
-  const normalized = userName.toLowerCase();
-  return names.some(function (row) { return String(row[0]).toLowerCase() === normalized; });
-}
-
-function registerUserName_(userName) {
-  const sheet = getOrCreateSheet_(USER_SHEET_NAME, USER_HEADER);
-  const now = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd HH:mm:ss');
-  sheet.appendRow([userName, now]);
-}
-
-/**
- * 100日チャレンジの開始日・節目メッセージを保存する（ユーザーごとに1件、上書き更新）
- */
 function handleChallengePost_(payload) {
-  const userName = sanitizeUserName_(payload.userName);
-  if (!userName) throw new Error('ユーザー名が指定されていません');
+  const session = resolveSession_(payload.token);
 
   const startDate = String(payload.startDate || '').trim();
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(startDate)) {
-    throw new Error('開始日を正しく指定してください');
-  }
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(startDate)) throw new Error('開始日を正しく指定してください');
 
   const messages = {
     25: sanitizeMessage_(payload.msg25),
@@ -257,9 +478,16 @@ function handleChallengePost_(payload) {
     100: sanitizeMessage_(payload.msg100)
   };
 
-  upsertChallenge_(userName, startDate, messages);
+  upsertChallenge_(session.email, startDate, messages);
 
   return { status: 'success', data: { startDate: startDate, messages: messages } };
+}
+
+function handleDiaryPost_(payload) {
+  const session = resolveSession_(payload.token);
+  const text = sanitizeMessage_(payload.text);
+  upsertDiaryToday_(session.email, text);
+  return { status: 'success', data: { text: text } };
 }
 
 function sanitizeMessage_(text) {
@@ -268,28 +496,96 @@ function sanitizeMessage_(text) {
 }
 
 /**
- * 本日の「ひとこと」を保存する（1日1件、当日分は上書き）
+ * ==============================================================
+ * 履歴の修正・削除（食事・体重）
+ * ==============================================================
  */
-function handleDiaryPost_(payload) {
-  const userName = sanitizeUserName_(payload.userName);
-  if (!userName) throw new Error('ユーザー名が指定されていません');
 
-  const text = sanitizeMessage_(payload.text);
-  upsertDiaryToday_(userName, text);
+function handleUpdateMealPost_(payload) {
+  const session = resolveSession_(payload.token);
+  const id = String(payload.id || '');
+  if (!id) throw new Error('対象のIDが指定されていません');
 
-  return { status: 'success', data: { text: text } };
+  const sheet = getOrCreateSheet_(MEAL_SHEET_NAME, MEAL_HEADER);
+  const rowIndex = findRowIndexByIdAndEmail_(sheet, id, session.email, 0, 1);
+  if (!rowIndex) throw new Error('対象の記録が見つかりませんでした');
+
+  const foodName = String(payload.foodName || '').trim().substring(0, 40);
+  const calories = Math.round(Number(payload.calories) || 0);
+  const protein = roundTo1_(payload.protein);
+  const fat = roundTo1_(payload.fat);
+  const carbs = roundTo1_(payload.carbs);
+
+  if (!foodName) throw new Error('料理名を入力してください');
+  if (calories < 0 || calories > 5000) throw new Error('カロリーを正しく入力してください（0〜5000kcal）');
+
+  sheet.getRange(rowIndex, 5, 1, 5).setValues([[foodName, calories, protein, fat, carbs]]);
+
+  return { status: 'success', data: { id: id } };
+}
+
+function handleDeleteMealPost_(payload) {
+  const session = resolveSession_(payload.token);
+  const id = String(payload.id || '');
+  if (!id) throw new Error('対象のIDが指定されていません');
+
+  const sheet = getOrCreateSheet_(MEAL_SHEET_NAME, MEAL_HEADER);
+  const rowIndex = findRowIndexByIdAndEmail_(sheet, id, session.email, 0, 1);
+  if (!rowIndex) throw new Error('対象の記録が見つかりませんでした');
+
+  sheet.deleteRow(rowIndex);
+  return { status: 'success', data: { id: id } };
+}
+
+function handleUpdateWeightPost_(payload) {
+  const session = resolveSession_(payload.token);
+  const id = String(payload.id || '');
+  if (!id) throw new Error('対象のIDが指定されていません');
+
+  const weightKg = Math.round(Number(payload.weightKg) * 10) / 10;
+  if (!weightKg || weightKg < 20 || weightKg > 300) throw new Error('体重を正しく入力してください（20〜300kg）');
+
+  const sheet = getOrCreateSheet_(WEIGHT_SHEET_NAME, WEIGHT_HEADER);
+  const rowIndex = findRowIndexByIdAndEmail_(sheet, id, session.email, 0, 1);
+  if (!rowIndex) throw new Error('対象の記録が見つかりませんでした');
+
+  sheet.getRange(rowIndex, 4, 1, 1).setValue(weightKg);
+  return { status: 'success', data: { id: id, weightKg: weightKg } };
+}
+
+function handleDeleteWeightPost_(payload) {
+  const session = resolveSession_(payload.token);
+  const id = String(payload.id || '');
+  if (!id) throw new Error('対象のIDが指定されていません');
+
+  const sheet = getOrCreateSheet_(WEIGHT_SHEET_NAME, WEIGHT_HEADER);
+  const rowIndex = findRowIndexByIdAndEmail_(sheet, id, session.email, 0, 1);
+  if (!rowIndex) throw new Error('対象の記録が見つかりませんでした');
+
+  sheet.deleteRow(rowIndex);
+  return { status: 'success', data: { id: id } };
+}
+
+function findRowIndexByIdAndEmail_(sheet, id, email, idColIdx, emailColIdx) {
+  if (sheet.getLastRow() < 2) return null;
+  const numCols = Math.max(idColIdx, emailColIdx) + 1;
+  const values = sheet.getRange(2, 1, sheet.getLastRow() - 1, numCols).getValues();
+  for (let i = 0; i < values.length; i++) {
+    if (values[i][idColIdx] === id && values[i][emailColIdx] === email) return i + 2;
+  }
+  return null;
 }
 
 /**
  * ==============================================================
- * ダッシュボード集計
+ * ダッシュボード・履歴 集計
  * ==============================================================
  */
 
-function buildDashboard_(userName) {
-  const profile = getProfile_(userName);
-  const latestWeight = getLatestWeight_(userName);
-  const todayMeals = getTodayMealRecords_(userName);
+function buildDashboard_(email) {
+  const profile = getProfile_(email);
+  const latestWeight = getLatestWeight_(email);
+  const todayMeals = getTodayMealRecords_(email);
   const todayCalories = todayMeals.reduce(function (sum, r) { return sum + (Number(r.calories) || 0); }, 0);
 
   let bmr = null, tdee = null, balance = null, weeklyDelta = null;
@@ -298,27 +594,18 @@ function buildDashboard_(userName) {
     const pal = palValue_(profile.age, profile.palLevel);
     tdee = Math.round(bmr * pal);
     balance = todayCalories - tdee;
-    // ΔW = (C_in - BMR×PAL) / 7200 の週間換算（体脂肪1kgあたり約7200kcalとして計算）
     weeklyDelta = Math.round((balance * 7 / 7200) * 100) / 100;
   }
 
-  const activeDays = getActiveDaysSet_(userName);
+  const activeDays = getActiveDaysSet_(email);
   const streakDays = calcStreak_(activeDays);
-  const todayDiary = getTodayDiary_(userName);
-  const challenge = buildChallengeInfo_(userName, activeDays);
+  const todayDiary = getTodayDiary_(email);
+  const challenge = buildChallengeInfo_(email, activeDays);
 
   return {
-    profile: profile,
-    latestWeight: latestWeight,
-    todayMeals: todayMeals,
-    todayCalories: todayCalories,
-    bmr: bmr,
-    tdee: tdee,
-    balance: balance,
-    weeklyDelta: weeklyDelta,
-    streakDays: streakDays,
-    todayDiary: todayDiary,
-    challenge: challenge
+    profile: profile, latestWeight: latestWeight, todayMeals: todayMeals, todayCalories: todayCalories,
+    bmr: bmr, tdee: tdee, balance: balance, weeklyDelta: weeklyDelta,
+    streakDays: streakDays, todayDiary: todayDiary, challenge: challenge
   };
 }
 
@@ -328,6 +615,39 @@ function emptyDashboard_() {
     bmr: null, tdee: null, balance: null, weeklyDelta: null,
     streakDays: 0, todayDiary: '', challenge: null
   };
+}
+
+function buildHistory_(email) {
+  const mealSheet = getOrCreateSheet_(MEAL_SHEET_NAME, MEAL_HEADER);
+  let meals = [];
+  if (mealSheet.getLastRow() >= 2) {
+    const values = mealSheet.getRange(2, 1, mealSheet.getLastRow() - 1, MEAL_HEADER.length).getValues();
+    meals = values
+      .filter(function (row) { return row[1] === email; })
+      .map(function (row) {
+        return {
+          id: row[0], date: row[2], time: row[3], foodName: row[4], calories: row[5],
+          protein: row[6], fat: row[7], carbs: row[8], imageUrl: row[9], note: row[10]
+        };
+      })
+      .sort(function (a, b) { return (b.date + b.time).localeCompare(a.date + a.time); })
+      .slice(0, 200);
+  }
+
+  const weightSheet = getOrCreateSheet_(WEIGHT_SHEET_NAME, WEIGHT_HEADER);
+  let weights = [];
+  if (weightSheet.getLastRow() >= 2) {
+    const values = weightSheet.getRange(2, 1, weightSheet.getLastRow() - 1, WEIGHT_HEADER.length).getValues();
+    weights = values
+      .filter(function (row) { return row[1] === email; })
+      .map(function (row) {
+        return { id: row[0], date: row[2], weightKg: row[3], time: row[4] };
+      })
+      .sort(function (a, b) { return String(b.date).localeCompare(String(a.date)); })
+      .slice(0, 200);
+  }
+
+  return { meals: meals, weights: weights };
 }
 
 /**
@@ -363,13 +683,13 @@ function calcBmr_(sex, age, weightKg) {
  * ==============================================================
  */
 
-function getProfile_(userName) {
+function getProfile_(email) {
   const sheet = getOrCreateSheet_(PROFILE_SHEET_NAME, PROFILE_HEADER);
   if (sheet.getLastRow() < 2) return null;
 
   const values = sheet.getRange(2, 1, sheet.getLastRow() - 1, PROFILE_HEADER.length).getValues();
   for (let i = 0; i < values.length; i++) {
-    if (values[i][0] === userName) {
+    if (values[i][0] === email) {
       return {
         sex: values[i][1] === '男性' ? 'male' : 'female',
         age: Number(values[i][2]),
@@ -381,14 +701,14 @@ function getProfile_(userName) {
   return null;
 }
 
-function upsertProfile_(userName, sex, age, heightCm, palLevel) {
+function upsertProfile_(email, sex, age, heightCm, palLevel) {
   const sheet = getOrCreateSheet_(PROFILE_SHEET_NAME, PROFILE_HEADER);
   const sexLabel = sex === 'male' ? '男性' : '女性';
   const palLabel = palLevelToLabel_(palLevel);
-  const now = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd HH:mm:ss');
+  const now = nowStr_();
 
-  const rowIndex = findRowIndexByName_(sheet, userName);
-  const rowData = [userName, sexLabel, age, heightCm, palLabel, now];
+  const rowIndex = findRowIndexByKey_(sheet, email);
+  const rowData = [email, sexLabel, age, heightCm, palLabel, now];
 
   if (rowIndex) {
     sheet.getRange(rowIndex, 1, 1, PROFILE_HEADER.length).setValues([rowData]);
@@ -411,49 +731,51 @@ function labelToPalLevel_(label) {
  * ==============================================================
  */
 
-function getLatestWeight_(userName) {
+function getLatestWeight_(email) {
   const sheet = getOrCreateSheet_(WEIGHT_SHEET_NAME, WEIGHT_HEADER);
   if (sheet.getLastRow() < 2) return null;
 
   const values = sheet.getRange(2, 1, sheet.getLastRow() - 1, WEIGHT_HEADER.length).getValues();
   let latest = null;
   values.forEach(function (row) {
-    if (row[0] === userName) {
-      if (!latest || String(row[1]) > latest.date) {
-        latest = { date: row[1], weightKg: Number(row[2]) };
+    if (row[1] === email) {
+      if (!latest || String(row[2]) > latest.date) {
+        latest = { id: row[0], date: row[2], weightKg: Number(row[3]) };
       }
     }
   });
   return latest;
 }
 
-function upsertWeightToday_(userName, weightKg) {
+function upsertWeightToday_(email, weightKg) {
   const sheet = getOrCreateSheet_(WEIGHT_SHEET_NAME, WEIGHT_HEADER);
-  const today = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd');
+  const today = todayStr_();
   const nowTime = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'HH:mm:ss');
 
   if (sheet.getLastRow() >= 2) {
-    const values = sheet.getRange(2, 1, sheet.getLastRow() - 1, 2).getValues();
+    const values = sheet.getRange(2, 1, sheet.getLastRow() - 1, 3).getValues();
     for (let i = 0; i < values.length; i++) {
-      if (values[i][0] === userName && values[i][1] === today) {
-        sheet.getRange(i + 2, 3, 1, 2).setValues([[weightKg, nowTime]]);
-        return;
+      if (values[i][1] === email && values[i][2] === today) {
+        sheet.getRange(i + 2, 4, 1, 2).setValues([[weightKg, nowTime]]);
+        return values[i][0];
       }
     }
   }
-  sheet.appendRow([userName, today, weightKg, nowTime]);
+  const id = Utilities.getUuid();
+  sheet.appendRow([id, email, today, weightKg, nowTime]);
+  return id;
 }
 
-function getWeightOnOrAfter_(userName, dateStr) {
+function getWeightOnOrAfter_(email, dateStr) {
   const sheet = getOrCreateSheet_(WEIGHT_SHEET_NAME, WEIGHT_HEADER);
   if (sheet.getLastRow() < 2) return null;
 
   const values = sheet.getRange(2, 1, sheet.getLastRow() - 1, WEIGHT_HEADER.length).getValues();
   let earliest = null;
   values.forEach(function (row) {
-    if (row[0] === userName && String(row[1]) >= dateStr) {
-      if (!earliest || String(row[1]) < earliest.date) {
-        earliest = { date: row[1], weightKg: Number(row[2]) };
+    if (row[1] === email && String(row[2]) >= dateStr) {
+      if (!earliest || String(row[2]) < earliest.date) {
+        earliest = { id: row[0], date: row[2], weightKg: Number(row[3]) };
       }
     }
   });
@@ -466,13 +788,13 @@ function getWeightOnOrAfter_(userName, dateStr) {
  * ==============================================================
  */
 
-function getChallenge_(userName) {
+function getChallenge_(email) {
   const sheet = getOrCreateSheet_(CHALLENGE_SHEET_NAME, CHALLENGE_HEADER);
   if (sheet.getLastRow() < 2) return null;
 
   const values = sheet.getRange(2, 1, sheet.getLastRow() - 1, CHALLENGE_HEADER.length).getValues();
   for (let i = 0; i < values.length; i++) {
-    if (values[i][0] === userName) {
+    if (values[i][0] === email) {
       return {
         startDate: values[i][1],
         messages: { 25: values[i][2] || '', 50: values[i][3] || '', 75: values[i][4] || '', 100: values[i][5] || '' }
@@ -482,12 +804,12 @@ function getChallenge_(userName) {
   return null;
 }
 
-function upsertChallenge_(userName, startDate, messages) {
+function upsertChallenge_(email, startDate, messages) {
   const sheet = getOrCreateSheet_(CHALLENGE_SHEET_NAME, CHALLENGE_HEADER);
-  const now = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd HH:mm:ss');
-  const rowData = [userName, startDate, messages[25], messages[50], messages[75], messages[100], now];
+  const now = nowStr_();
+  const rowData = [email, startDate, messages[25], messages[50], messages[75], messages[100], now];
 
-  const rowIndex = findRowIndexByName_(sheet, userName);
+  const rowIndex = findRowIndexByKey_(sheet, email);
   if (rowIndex) {
     sheet.getRange(rowIndex, 1, 1, CHALLENGE_HEADER.length).setValues([rowData]);
   } else {
@@ -495,8 +817,8 @@ function upsertChallenge_(userName, startDate, messages) {
   }
 }
 
-function buildChallengeInfo_(userName, activeDays) {
-  const challenge = getChallenge_(userName);
+function buildChallengeInfo_(email, activeDays) {
+  const challenge = getChallenge_(email);
   if (!challenge) return null;
 
   const today = todayStr_();
@@ -507,89 +829,75 @@ function buildChallengeInfo_(userName, activeDays) {
   const progressPercent = Math.min(100, Math.round((dayIndexClamped / CHALLENGE_TOTAL_DAYS) * 100));
   const loggedDays = countLoggedDaysInRange_(activeDays, challenge.startDate, today);
 
-  const startWeight = getWeightOnOrAfter_(userName, challenge.startDate);
-  const latestWeight = getLatestWeight_(userName);
+  const startWeight = getWeightOnOrAfter_(email, challenge.startDate);
+  const latestWeight = getLatestWeight_(email);
   let weightDelta = null;
   if (startWeight && latestWeight) {
     weightDelta = Math.round((latestWeight.weightKg - startWeight.weightKg) * 10) / 10;
   }
 
   return {
-    startDate: challenge.startDate,
-    dayIndex: dayIndex,
-    totalDays: CHALLENGE_TOTAL_DAYS,
-    progressPercent: progressPercent,
-    completed: completed,
-    messages: challenge.messages,
-    loggedDays: loggedDays,
-    weightDelta: weightDelta
+    startDate: challenge.startDate, dayIndex: dayIndex, totalDays: CHALLENGE_TOTAL_DAYS,
+    progressPercent: progressPercent, completed: completed, messages: challenge.messages,
+    loggedDays: loggedDays, weightDelta: weightDelta
   };
 }
 
-function getTodayDiary_(userName) {
+function getTodayDiary_(email) {
   const sheet = getOrCreateSheet_(DIARY_SHEET_NAME, DIARY_HEADER);
   if (sheet.getLastRow() < 2) return '';
 
   const today = todayStr_();
   const values = sheet.getRange(2, 1, sheet.getLastRow() - 1, DIARY_HEADER.length).getValues();
   for (let i = 0; i < values.length; i++) {
-    if (values[i][0] === userName && values[i][1] === today) return values[i][2] || '';
+    if (values[i][0] === email && values[i][1] === today) return values[i][2] || '';
   }
   return '';
 }
 
-function upsertDiaryToday_(userName, text) {
+function upsertDiaryToday_(email, text) {
   const sheet = getOrCreateSheet_(DIARY_SHEET_NAME, DIARY_HEADER);
   const today = todayStr_();
 
   if (sheet.getLastRow() >= 2) {
     const values = sheet.getRange(2, 1, sheet.getLastRow() - 1, 2).getValues();
     for (let i = 0; i < values.length; i++) {
-      if (values[i][0] === userName && values[i][1] === today) {
+      if (values[i][0] === email && values[i][1] === today) {
         sheet.getRange(i + 2, 3, 1, 1).setValues([[text]]);
         return;
       }
     }
   }
-  sheet.appendRow([userName, today, text]);
+  sheet.appendRow([email, today, text]);
 }
 
-/**
- * ユーザーが何らかの記録（食事・体重・ひとこと）を行った日付の集合を返す。
- * 継続日数（ストリーク）と、チャレンジ期間中の記録日数の算出に使用する。
- */
-function getActiveDaysSet_(userName) {
+function getActiveDaysSet_(email) {
   const days = {};
 
   const mealSheet = getOrCreateSheet_(MEAL_SHEET_NAME, MEAL_HEADER);
   if (mealSheet.getLastRow() >= 2) {
-    mealSheet.getRange(2, 1, mealSheet.getLastRow() - 1, 2).getValues().forEach(function (row) {
-      if (row[0] === userName) days[row[1]] = true;
+    mealSheet.getRange(2, 1, mealSheet.getLastRow() - 1, 3).getValues().forEach(function (row) {
+      if (row[1] === email) days[row[2]] = true;
     });
   }
 
   const weightSheet = getOrCreateSheet_(WEIGHT_SHEET_NAME, WEIGHT_HEADER);
   if (weightSheet.getLastRow() >= 2) {
-    weightSheet.getRange(2, 1, weightSheet.getLastRow() - 1, 2).getValues().forEach(function (row) {
-      if (row[0] === userName) days[row[1]] = true;
+    weightSheet.getRange(2, 1, weightSheet.getLastRow() - 1, 3).getValues().forEach(function (row) {
+      if (row[1] === email) days[row[2]] = true;
     });
   }
 
   const diarySheet = getOrCreateSheet_(DIARY_SHEET_NAME, DIARY_HEADER);
   if (diarySheet.getLastRow() >= 2) {
     diarySheet.getRange(2, 1, diarySheet.getLastRow() - 1, 2).getValues().forEach(function (row) {
-      if (row[0] === userName) days[row[1]] = true;
+      if (row[0] === email) days[row[1]] = true;
     });
   }
 
   return days;
 }
 
-/**
- * 直近の連続記録日数を計算する。
- * 今日まだ何も記録していなくても、昨日まで連続していればストリークは切らさない
- * （「今日はこれから記録する」ことを妨げないため）。
- */
 function calcStreak_(activeDaysSet) {
   let streak = 0;
   let cursor = new Date();
@@ -633,6 +941,10 @@ function todayStr_() {
   return Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd');
 }
 
+function nowStr_() {
+  return Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd HH:mm:ss');
+}
+
 /**
  * ==============================================================
  * 食事記録（画像解析・追記・取得）
@@ -641,9 +953,7 @@ function todayStr_() {
 
 function analyzeFoodImage_(base64Image, mimeType) {
   const apiKey = PropertiesService.getScriptProperties().getProperty('GEMINI_API_KEY');
-  if (!apiKey) {
-    throw new Error('スクリプトプロパティに GEMINI_API_KEY が設定されていません');
-  }
+  if (!apiKey) throw new Error('スクリプトプロパティに GEMINI_API_KEY が設定されていません');
 
   const url = 'https://generativelanguage.googleapis.com/v1beta/models/' + GEMINI_MODEL + ':generateContent';
 
@@ -664,15 +974,8 @@ function analyzeFoodImage_(base64Image, mimeType) {
     '}';
 
   const requestBody = {
-    contents: [{
-      parts: [
-        { text: prompt },
-        { inline_data: { mime_type: mimeType, data: base64Image } }
-      ]
-    }],
-    generationConfig: {
-      responseMimeType: 'application/json'
-    }
+    contents: [{ parts: [{ text: prompt }, { inline_data: { mime_type: mimeType, data: base64Image } }] }],
+    generationConfig: { responseMimeType: 'application/json' }
   };
 
   const options = {
@@ -728,14 +1031,14 @@ function roundTo1_(value) {
   return Math.round(n * 10) / 10;
 }
 
-function saveImageToDrive_(base64Image, mimeType, userName) {
+function saveImageToDrive_(base64Image, mimeType, email) {
   const folderId = PropertiesService.getScriptProperties().getProperty('DRIVE_FOLDER_ID');
   if (!folderId) return '';
 
   const folder = DriveApp.getFolderById(folderId);
   const decoded = Utilities.base64Decode(base64Image);
   const ext = mimeType.split('/')[1] || 'jpg';
-  const safeName = (userName || 'unknown').replace(/[^\w\u3040-\u30FF\u4E00-\u9FFF-]/g, '_');
+  const safeName = (email || 'unknown').replace(/[^\w\u3040-\u30FF\u4E00-\u9FFF-]/g, '_');
   const fileName = safeName + '_' + Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyyMMdd_HHmmss') + '.' + ext;
   const blob = Utilities.newBlob(decoded, mimeType, fileName);
   const file = folder.createFile(blob);
@@ -743,38 +1046,35 @@ function saveImageToDrive_(base64Image, mimeType, userName) {
   return file.getUrl();
 }
 
-function appendMealRecord_(userName, analysis, imageUrl) {
+function appendMealRecord_(email, analysis, imageUrl) {
   const sheet = getOrCreateSheet_(MEAL_SHEET_NAME, MEAL_HEADER);
   const now = new Date();
+  const id = Utilities.getUuid();
 
   sheet.appendRow([
-    userName,
+    id, email,
     Utilities.formatDate(now, 'Asia/Tokyo', 'yyyy-MM-dd'),
     Utilities.formatDate(now, 'Asia/Tokyo', 'HH:mm:ss'),
-    analysis.foodName,
-    analysis.calories,
-    analysis.protein,
-    analysis.fat,
-    analysis.carbs,
-    imageUrl,
-    analysis.note
+    analysis.foodName, analysis.calories, analysis.protein, analysis.fat, analysis.carbs,
+    imageUrl, analysis.note
   ]);
+  return id;
 }
 
-function getTodayMealRecords_(userName) {
+function getTodayMealRecords_(email) {
   const sheet = getOrCreateSheet_(MEAL_SHEET_NAME, MEAL_HEADER);
   if (sheet.getLastRow() < 2) return [];
 
-  const today = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd');
+  const today = todayStr_();
   const values = sheet.getRange(2, 1, sheet.getLastRow() - 1, MEAL_HEADER.length).getValues();
 
   return values
-    .filter(function (row) { return row[0] === userName && row[1] === today; })
+    .filter(function (row) { return row[1] === email && row[2] === today; })
     .map(function (row) {
       return {
-        name: row[0], date: row[1], time: row[2], foodName: row[3],
-        calories: row[4], protein: row[5], fat: row[6], carbs: row[7],
-        imageUrl: row[8], note: row[9]
+        id: row[0], date: row[2], time: row[3], foodName: row[4],
+        calories: row[5], protein: row[6], fat: row[7], carbs: row[8],
+        imageUrl: row[9], note: row[10]
       };
     })
     .reverse();
@@ -786,17 +1086,11 @@ function getTodayMealRecords_(userName) {
  * ==============================================================
  */
 
-function sanitizeUserName_(name) {
-  if (!name) return '';
-  const trimmed = String(name).trim().replace(/[\r\n\t]/g, '');
-  return trimmed.substring(0, 20);
-}
-
-function findRowIndexByName_(sheet, userName) {
+function findRowIndexByKey_(sheet, key) {
   if (sheet.getLastRow() < 2) return null;
-  const names = sheet.getRange(2, 1, sheet.getLastRow() - 1, 1).getValues();
-  for (let i = 0; i < names.length; i++) {
-    if (names[i][0] === userName) return i + 2;
+  const keys = sheet.getRange(2, 1, sheet.getLastRow() - 1, 1).getValues();
+  for (let i = 0; i < keys.length; i++) {
+    if (keys[i][0] === key) return i + 2;
   }
   return null;
 }
