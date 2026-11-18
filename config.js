@@ -4,7 +4,7 @@
 // ============================================================
 window.APP_CONFIG = {
   // フロントエンドのバージョン（画面下部に表示）
-  APP_VERSION: 'v1.2.0',
+  APP_VERSION: 'v1.2.1',
 
   // GASのWebアプリ公開URL（.../exec）
   GAS_EXEC_URL: 'https://script.google.com/macros/s/AKfycbzHLbZzMjTqCuLsTp6QJWdGETWzJ7XNcI87VBA9anlFp-rziCQH4XosWBNo9j2sX80qyg/exec',
