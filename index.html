@@ -711,7 +711,7 @@
   </div>
 </div>
 
-<script src="config.js"></script>
+<script src="config.js?v=1.2.1"></script>
 <script>
 // ============================================================
 // 設定は config.js（window.APP_CONFIG）で行います
@@ -1014,7 +1014,7 @@ async function onFileSelected(ev){
     const result = await postToGas({ type: 'meal', token: currentToken, image: base64, mimeType: mimeType, model: GEMINI_MODEL });
     if (result.model) {
       $('verModel').textContent = result.fallback
-        ? result.model + '（' + result.requestedModel + ' は該当なしのため最新モデルに切替）'
+        ? result.model + '（' + result.requestedModel + ' が使えなかったため自動で切替）'
         : result.model;
     }
 
