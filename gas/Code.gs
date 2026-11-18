@@ -21,14 +21,14 @@
  *   PASSWORD_PEPPER : パスワードハッシュ化に使う秘密文字列（必須）
  *   GEMINI_MODEL    : 使用するGeminiモデル名（任意。例: gemini-3.5-flash）
  *                     フロントの config.js でモデル指定がない場合に使われる。
- *                     未設定なら FALLBACK_GEMINI_MODEL（汎用の最新版）を使用。
+ *                     未設定なら汎用の最新モデル（FALLBACK_GEMINI_MODELS）を使用。
  *
  * 【Geminiモデルの決定順】
- *   1. フロント（docs/config.js の GEMINI_MODEL）から送られたモデル名
+ *   1. フロントで選ばれたモデル（画面の「AIモデル」選択 → config.js の GEMINI_MODEL）
  *   2. スクリプトプロパティ GEMINI_MODEL
- *   3. FALLBACK_GEMINI_MODEL（gemini-flash-latest ＝ 常に最新のFlashを指すエイリアス）
+ *   3. 汎用の最新モデル FALLBACK_GEMINI_MODELS を先頭から順に試す
  *   ※ モデル名は "gemini-" で始まる英小文字・数字・ハイフン・ドットのみ受け付ける。
- *   ※ 指定モデルが存在しない（廃止・名前違い）場合は、自動で FALLBACK_GEMINI_MODEL に切り替えて再実行する。
+ *   ※ 指定モデルに該当がない（廃止・未公開・名前違い）場合は、自動で 3 に切り替えて再実行する。
  *
  * 【Webアプリのデプロイ設定】
  *   実行するユーザー: 自分（スクリプト所有者）
@@ -50,8 +50,12 @@ const STEPS_SHEET_NAME = '歩数記録';
 const USER_SHEET_NAME = 'ユーザー';
 const CHALLENGE_SHEET_NAME = 'チャレンジ';
 const DIARY_SHEET_NAME = 'ひとこと日記';
-const APP_VERSION = 'v1.1.0'; // GASバックエンドのバージョン（デプロイ時に更新）
-const FALLBACK_GEMINI_MODEL = 'gemini-flash-latest'; // 指定なし・該当なしの時に使う汎用最新モデル（Googleが自動で最新版に更新）
+const APP_VERSION = 'v1.2.0'; // GASバックエンドのバージョン（デプロイ時に更新）
+// 指定なし・該当なしの時に使う汎用最新モデル（先頭から順に試す）
+//   gemini-flash-latest : Googleが常に最新の汎用モデルへ自動で差し替えるエイリアス
+//   gemini-4-hydrogen   : 2026年11月時点の汎用最新モデル（「日々の暮らしをサポート」）
+//   gemini-3.8-flash    : 最終的な保険
+const FALLBACK_GEMINI_MODELS = ['gemini-flash-latest', 'gemini-4-hydrogen', 'gemini-3.8-flash'];
 const GEMINI_MODEL_PATTERN = /^gemini-[a-z0-9][a-z0-9.\-]{0,60}$/;
 const GEMINI_RETRY_CODES = [429, 500, 503];
 const GEMINI_MAX_ATTEMPTS = 3;
@@ -1205,7 +1209,7 @@ function buildVersionInfo_() {
   return {
     gasVersion: APP_VERSION,
     defaultModel: resolveGeminiModel_(''),
-    fallbackModel: FALLBACK_GEMINI_MODEL,
+    fallbackModels: FALLBACK_GEMINI_MODELS,
     serverTime: nowStr_()
   };
 }
@@ -1221,7 +1225,7 @@ function resolveGeminiModel_(requested) {
   const prop = String(PropertiesService.getScriptProperties().getProperty('GEMINI_MODEL') || '').trim().toLowerCase();
   if (prop && GEMINI_MODEL_PATTERN.test(prop)) return prop;
 
-  return FALLBACK_GEMINI_MODEL;
+  return FALLBACK_GEMINI_MODELS[0];
 }
 
 /**
@@ -1287,14 +1291,15 @@ function analyzeFoodImage_(base64Image, mimeType, model) {
     generationConfig: { responseMimeType: 'application/json' }
   };
 
+  // 指定モデル → 汎用の最新モデル（順番に）で、該当があるまで試す
+  const candidates = [geminiModel].concat(FALLBACK_GEMINI_MODELS.filter(function (m) { return m !== geminiModel; }));
   let usedModel = geminiModel;
-  let res = callGeminiModel_(usedModel, apiKey, requestBody);
-
-  // 指定モデルに該当がない場合は汎用の最新モデルで再実行
-  if (isModelNotFound_(res.code, res.text) && usedModel !== FALLBACK_GEMINI_MODEL) {
-    console.warn('Geminiモデル「' + usedModel + '」が見つからないため ' + FALLBACK_GEMINI_MODEL + ' に切り替えます');
-    usedModel = FALLBACK_GEMINI_MODEL;
+  let res = null;
+  for (let i = 0; i < candidates.length; i++) {
+    usedModel = candidates[i];
     res = callGeminiModel_(usedModel, apiKey, requestBody);
+    if (!isModelNotFound_(res.code, res.text)) break;
+    console.warn('Geminiモデル「' + usedModel + '」に該当がないため次の候補に切り替えます');
   }
 
   const code = res.code;

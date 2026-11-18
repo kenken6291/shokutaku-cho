@@ -255,6 +255,13 @@
     font-size:12px;padding:10px 14px;border-radius:4px;margin-bottom:20px;line-height:1.6;
   }
   .configwarn.show{display:block;}
+  .model-picker{margin:14px auto 0;max-width:320px;text-align:left;}
+  .model-picker label{display:block;font-size:12px;color:var(--ink-soft);margin-bottom:4px;letter-spacing:.04em;}
+  .model-picker select{
+    width:100%;padding:9px 10px;font-size:14px;font-family:inherit;color:var(--ink);
+    background:var(--card);border:1px solid var(--paper-line);border-radius:8px;
+  }
+  .model-picker .model-hint{font-size:11px;color:var(--ink-soft);margin-top:4px;}
   .version-info{
     margin:28px 0 0;text-align:center;font-size:11px;line-height:1.7;
     color:var(--ink-soft);letter-spacing:.04em;
@@ -634,6 +641,11 @@
       </button>
       <div class="hint">タップして食事の写真を撮影</div>
       <button class="altpick" id="libraryBtn">アルバムから選ぶ（撮影済みの写真もOK）</button>
+      <div class="model-picker">
+        <label for="modelSelect">解析に使うAIモデル</label>
+        <select id="modelSelect"></select>
+        <div class="model-hint">選んだモデルが使えない時は、汎用の最新モデルに自動で切り替わります</div>
+      </div>
       <input type="file" id="fileInputCamera" accept="image/*" capture="environment">
       <input type="file" id="fileInputLibrary" accept="image/*">
     </div>
@@ -707,7 +719,12 @@
 const APP_CONFIG = window.APP_CONFIG || {};
 const APP_VERSION = APP_CONFIG.APP_VERSION || '-';
 const GAS_EXEC_URL = APP_CONFIG.GAS_EXEC_URL || '';
-const GEMINI_MODEL = APP_CONFIG.GEMINI_MODEL || '';
+const DEFAULT_GEMINI_MODEL = APP_CONFIG.GEMINI_MODEL || '';
+const GEMINI_MODEL_OPTIONS = Array.isArray(APP_CONFIG.GEMINI_MODEL_OPTIONS) && APP_CONFIG.GEMINI_MODEL_OPTIONS.length
+  ? APP_CONFIG.GEMINI_MODEL_OPTIONS
+  : [{ value: '', label: '自動モード（汎用の最新）' }];
+const MODEL_KEY = 'shokutakucho_gemini_model';
+let GEMINI_MODEL = DEFAULT_GEMINI_MODEL;
 const TOKEN_KEY = 'shokutakucho_token';
 
 const $ = (id) => document.getElementById(id);
@@ -746,6 +763,7 @@ function clearSession(){
 
 async function init(){
   if (!isConfigured()) $('configwarn').classList.add('show');
+  setupModelPicker();
   loadVersionInfo();
 
   /* ---- 認証まわり ---- */
@@ -996,7 +1014,7 @@ async function onFileSelected(ev){
     const result = await postToGas({ type: 'meal', token: currentToken, image: base64, mimeType: mimeType, model: GEMINI_MODEL });
     if (result.model) {
       $('verModel').textContent = result.fallback
-        ? result.model + '（' + result.requestedModel + ' は該当なしのため切替）'
+        ? result.model + '（' + result.requestedModel + ' は該当なしのため最新モデルに切替）'
         : result.model;
     }
 
@@ -1674,11 +1692,39 @@ async function onDeleteSteps(id, li){
   }
 }
 
+/* ================= AIモデル選択 ================= */
+
+function modelLabel(value){
+  const opt = GEMINI_MODEL_OPTIONS.find(o => o.value === value);
+  return opt ? opt.label : (value || '自動モード（汎用の最新）');
+}
+
+function setupModelPicker(){
+  let saved = null;
+  try { saved = localStorage.getItem(MODEL_KEY); } catch (e) { /* ignore */ }
+  if (saved !== null && GEMINI_MODEL_OPTIONS.some(o => o.value === saved)) GEMINI_MODEL = saved;
+
+  const sel = $('modelSelect');
+  sel.innerHTML = '';
+  GEMINI_MODEL_OPTIONS.forEach(o => {
+    const op = document.createElement('option');
+    op.value = o.value;
+    op.textContent = o.label;
+    sel.appendChild(op);
+  });
+  sel.value = GEMINI_MODEL;
+  sel.addEventListener('change', () => {
+    GEMINI_MODEL = sel.value;
+    try { localStorage.setItem(MODEL_KEY, GEMINI_MODEL); } catch (e) { /* ignore */ }
+    $('verModel').textContent = modelLabel(GEMINI_MODEL);
+  });
+}
+
 /* ================= バージョン情報 ================= */
 
 async function loadVersionInfo(){
   $('verFront').textContent = APP_VERSION;
-  $('verModel').textContent = GEMINI_MODEL || '（GAS既定）';
+  $('verModel').textContent = modelLabel(GEMINI_MODEL);
   if (!isConfigured()) { $('verGas').textContent = '未設定'; return; }
   try {
     const res = await fetch(GAS_EXEC_URL + '?action=version', { method: 'GET' });
