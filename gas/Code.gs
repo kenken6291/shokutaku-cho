@@ -19,6 +19,16 @@
  *   SHEET_ID        : 記録先スプレッドシートのID（未設定ならバインド先スプレッドシートを使用）
  *   DRIVE_FOLDER_ID : 食事写真を保存するGoogle DriveフォルダID（任意）
  *   PASSWORD_PEPPER : パスワードハッシュ化に使う秘密文字列（必須）
+ *   GEMINI_MODEL    : 使用するGeminiモデル名（任意。例: gemini-3.5-flash）
+ *                     フロントの config.js でモデル指定がない場合に使われる。
+ *                     未設定なら FALLBACK_GEMINI_MODEL（汎用の最新版）を使用。
+ *
+ * 【Geminiモデルの決定順】
+ *   1. フロント（docs/config.js の GEMINI_MODEL）から送られたモデル名
+ *   2. スクリプトプロパティ GEMINI_MODEL
+ *   3. FALLBACK_GEMINI_MODEL（gemini-flash-latest ＝ 常に最新のFlashを指すエイリアス）
+ *   ※ モデル名は "gemini-" で始まる英小文字・数字・ハイフン・ドットのみ受け付ける。
+ *   ※ 指定モデルが存在しない（廃止・名前違い）場合は、自動で FALLBACK_GEMINI_MODEL に切り替えて再実行する。
  *
  * 【Webアプリのデプロイ設定】
  *   実行するユーザー: 自分（スクリプト所有者）
@@ -40,7 +50,11 @@ const STEPS_SHEET_NAME = '歩数記録';
 const USER_SHEET_NAME = 'ユーザー';
 const CHALLENGE_SHEET_NAME = 'チャレンジ';
 const DIARY_SHEET_NAME = 'ひとこと日記';
-const GEMINI_MODEL = 'gemini-3.5-flash'; // 現行の安定版フラッグシップモデル（2026年7月時点）
+const APP_VERSION = 'v1.1.0'; // GASバックエンドのバージョン（デプロイ時に更新）
+const FALLBACK_GEMINI_MODEL = 'gemini-flash-latest'; // 指定なし・該当なしの時に使う汎用最新モデル（Googleが自動で最新版に更新）
+const GEMINI_MODEL_PATTERN = /^gemini-[a-z0-9][a-z0-9.\-]{0,60}$/;
+const GEMINI_RETRY_CODES = [429, 500, 503];
+const GEMINI_MAX_ATTEMPTS = 3;
 const CHALLENGE_TOTAL_DAYS = 100;
 const MIN_PASSWORD_LENGTH = 8;
 const STEPS_KCAL_PER_KG_PER_STEP = 0.0005; // 歩数消費カロリーの係数（下記 calcStepsCalories_ 参照）
@@ -161,6 +175,7 @@ function doPost(e) {
  * データ取得。クエリパラメータ:
  *   ?token=セッショントークン&action=dashboard  … 本日のダッシュボード（既定）
  *   ?token=セッショントークン&action=history    … 食事・体重・歩数の全履歴
+ *   ?action=version                              … バージョン情報（トークン不要）
  */
 function doGet(e) {
   const output = ContentService.createTextOutput().setMimeType(ContentService.MimeType.JSON);
@@ -168,6 +183,11 @@ function doGet(e) {
   try {
     const token = e && e.parameter && e.parameter.token;
     const action = (e && e.parameter && e.parameter.action) || 'dashboard';
+
+    if (action === 'version') {
+      output.setContent(JSON.stringify({ status: 'success', data: buildVersionInfo_() }));
+      return output;
+    }
 
     if (!token) {
       const empty = action === 'history' ? { meals: [], weights: [], steps: [] } : emptyDashboard_();
@@ -438,7 +458,10 @@ function handleMealPost_(payload) {
     throw new Error('対応していない画像形式です: ' + mimeType);
   }
 
-  const analysis = analyzeFoodImage_(base64Image, mimeType);
+  const model = resolveGeminiModel_(payload.model);
+  const analysis = analyzeFoodImage_(base64Image, mimeType, model);
+  const usedModel = analysis.usedModel || model;
+  delete analysis.usedModel;
 
   let imageUrl = '';
   try {
@@ -449,7 +472,7 @@ function handleMealPost_(payload) {
 
   const id = appendMealRecord_(email, analysis, imageUrl);
 
-  return { status: 'success', data: analysis, imageUrl: imageUrl, id: id };
+  return { status: 'success', data: analysis, imageUrl: imageUrl, id: id, model: usedModel, requestedModel: model, fallback: usedModel !== model };
 }
 
 function handleProfilePost_(payload) {
@@ -1172,11 +1195,76 @@ function normalizeTimeInput_(time) {
  * ==============================================================
  */
 
-function analyzeFoodImage_(base64Image, mimeType) {
+/**
+ * ==============================================================
+ * バージョン情報・Geminiモデル決定
+ * ==============================================================
+ */
+
+function buildVersionInfo_() {
+  return {
+    gasVersion: APP_VERSION,
+    defaultModel: resolveGeminiModel_(''),
+    fallbackModel: FALLBACK_GEMINI_MODEL,
+    serverTime: nowStr_()
+  };
+}
+
+/**
+ * 使用するGeminiモデル名を決定する。
+ * フロント指定 → スクリプトプロパティ → 既定値 の順。不正な名前は無視する。
+ */
+function resolveGeminiModel_(requested) {
+  const req = String(requested || '').trim().toLowerCase();
+  if (req && GEMINI_MODEL_PATTERN.test(req)) return req;
+
+  const prop = String(PropertiesService.getScriptProperties().getProperty('GEMINI_MODEL') || '').trim().toLowerCase();
+  if (prop && GEMINI_MODEL_PATTERN.test(prop)) return prop;
+
+  return FALLBACK_GEMINI_MODEL;
+}
+
+/**
+ * Gemini APIを1モデルに対して呼び出す。混雑(429/500/503)時は待ち時間を伸ばしながら再試行する。
+ */
+function callGeminiModel_(model, apiKey, requestBody) {
+  const url = 'https://generativelanguage.googleapis.com/v1beta/models/' + encodeURIComponent(model) + ':generateContent';
+  const options = {
+    method: 'post',
+    contentType: 'application/json',
+    headers: { 'x-goog-api-key': apiKey },
+    payload: JSON.stringify(requestBody),
+    muteHttpExceptions: true
+  };
+
+  let code = 0;
+  let text = '';
+  for (let attempt = 1; attempt <= GEMINI_MAX_ATTEMPTS; attempt++) {
+    const response = UrlFetchApp.fetch(url, options);
+    code = response.getResponseCode();
+    text = response.getContentText();
+    if (code === 200) break;
+    if (GEMINI_RETRY_CODES.indexOf(code) === -1 || attempt === GEMINI_MAX_ATTEMPTS) break;
+    Utilities.sleep(2000 * attempt);
+  }
+  return { code: code, text: text };
+}
+
+/**
+ * モデルが存在しない（廃止・名前違い）ことを示す応答かどうか。
+ */
+function isModelNotFound_(code, text) {
+  if (code === 404) return true;
+  if (code === 400 && /model|NOT_FOUND|not found|not supported/i.test(text)) {
+    return /not found|is not supported|NOT_FOUND|unknown model|invalid model/i.test(text);
+  }
+  return false;
+}
+
+function analyzeFoodImage_(base64Image, mimeType, model) {
+  const geminiModel = model || resolveGeminiModel_('');
   const apiKey = PropertiesService.getScriptProperties().getProperty('GEMINI_API_KEY');
   if (!apiKey) throw new Error('スクリプトプロパティに GEMINI_API_KEY が設定されていません');
-
-  const url = 'https://generativelanguage.googleapis.com/v1beta/models/' + GEMINI_MODEL + ':generateContent';
 
   const prompt =
     'あなたは管理栄養士です。添付された食事の写真を見て、日本の一般的な食事を基準に' +
@@ -1199,20 +1287,20 @@ function analyzeFoodImage_(base64Image, mimeType) {
     generationConfig: { responseMimeType: 'application/json' }
   };
 
-  const options = {
-    method: 'post',
-    contentType: 'application/json',
-    headers: { 'x-goog-api-key': apiKey },
-    payload: JSON.stringify(requestBody),
-    muteHttpExceptions: true
-  };
+  let usedModel = geminiModel;
+  let res = callGeminiModel_(usedModel, apiKey, requestBody);
 
-  const response = UrlFetchApp.fetch(url, options);
-  const code = response.getResponseCode();
-  const text = response.getContentText();
+  // 指定モデルに該当がない場合は汎用の最新モデルで再実行
+  if (isModelNotFound_(res.code, res.text) && usedModel !== FALLBACK_GEMINI_MODEL) {
+    console.warn('Geminiモデル「' + usedModel + '」が見つからないため ' + FALLBACK_GEMINI_MODEL + ' に切り替えます');
+    usedModel = FALLBACK_GEMINI_MODEL;
+    res = callGeminiModel_(usedModel, apiKey, requestBody);
+  }
 
+  const code = res.code;
+  const text = res.text;
   if (code !== 200) {
-    throw new Error('Gemini APIエラー (HTTP ' + code + '): ' + text.substring(0, 300));
+    throw new Error('Gemini APIエラー (HTTP ' + code + ', ' + usedModel + '): ' + text.substring(0, 300));
   }
 
   const json = JSON.parse(text);
@@ -1243,7 +1331,8 @@ function analyzeFoodImage_(base64Image, mimeType) {
     protein: roundTo1_(parsed.protein),
     fat: roundTo1_(parsed.fat),
     carbs: roundTo1_(parsed.carbs),
-    note: String(parsed.note || '').substring(0, 100)
+    note: String(parsed.note || '').substring(0, 100),
+    usedModel: usedModel
   };
 }
 
@@ -1394,4 +1483,5 @@ function repairSheetDates_(sheetName, header) {
 function testGeminiConnection() {
   const apiKey = PropertiesService.getScriptProperties().getProperty('GEMINI_API_KEY');
   Logger.log(apiKey ? 'GEMINI_API_KEY は設定されています（' + apiKey.substring(0, 4) + '...）' : 'GEMINI_API_KEY が未設定です');
+  Logger.log('GASバージョン: ' + APP_VERSION + ' / 既定モデル: ' + resolveGeminiModel_(''));
 }
